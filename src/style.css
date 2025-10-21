@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply m-0 bg-darker text-gray-100 overflow-hidden;
+  }
+
+  #app {
+    @apply h-screen w-screen flex flex-col;
+  }
+}
+
+@layer components {
+  .waveform-canvas {
+    @apply cursor-crosshair;
+  }
+
+  .track-container {
+    @apply bg-dark border border-gray-700 rounded-lg overflow-hidden;
+  }
+
+  .toolbar-button {
+    @apply px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors duration-200;
+  }
+
+  .effect-panel {
+    @apply bg-dark border border-gray-700 rounded-lg p-4;
+  }
+}
