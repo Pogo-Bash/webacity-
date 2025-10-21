@@ -136,14 +136,18 @@ const fileInput = ref(null)
 
 // Calculate playhead position for global overlay
 const playheadPosition = computed(() => {
-  if (!timeline.value || !audioStore.duration) return 0
+  // Reference currentTime and duration to make reactive
+  const time = audioStore.currentTime
+  const duration = audioStore.duration
+
+  if (!timeline.value || duration === 0) return 0
 
   // Get the timeline ruler element from the Timeline component
   const timelineEl = timeline.value.$el?.querySelector('.timeline-container')
   if (!timelineEl) return 0
 
   const rect = timelineEl.getBoundingClientRect()
-  const ratio = audioStore.currentTime / audioStore.duration
+  const ratio = time / duration
   return rect.left + (rect.width * ratio)
 })
 

@@ -57,17 +57,6 @@
       @dragleave="handleDragLeave"
       @drop.prevent="handleDrop"
     >
-      <!-- Background waveform (mixed) - dimmed -->
-      <canvas
-        ref="waveformCanvas"
-        class="waveform-canvas w-full h-full opacity-30"
-        @mousedown="startSelection"
-        @mousemove="updateSelection"
-        @mouseup="endSelection"
-        @mouseleave="endSelection"
-        @contextmenu.prevent="handleContextMenu"
-      ></canvas>
-
       <!-- Audio clips -->
       <AudioClip
         v-for="clip in track.clips"
@@ -77,6 +66,14 @@
         :project-duration="audioStore.duration || 1"
         @delete="deleteClip"
       />
+
+      <!-- Empty track message -->
+      <div
+        v-if="track.clips.length === 0"
+        class="absolute inset-0 flex items-center justify-center text-gray-500 text-sm pointer-events-none"
+      >
+        Empty track - Drag audio here or paste
+      </div>
 
       <!-- Selection overlay -->
       <div

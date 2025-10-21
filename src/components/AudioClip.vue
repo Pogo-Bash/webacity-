@@ -174,13 +174,16 @@ function onDragEnd(event) {
 }
 
 // Watch for changes that require redraw
-watch(() => [props.clip.waveformData, clipWidth.value], () => {
-  drawWaveform()
+watch(() => [props.clip.waveformData, props.clip.startTime, props.clip.duration, props.projectDuration], () => {
+  setTimeout(() => drawWaveform(), 0)
 }, { deep: true })
 
 onMounted(() => {
-  drawWaveform()
+  // Delay initial draw to ensure element is sized
+  setTimeout(() => drawWaveform(), 100)
   // Redraw on window resize
-  window.addEventListener('resize', drawWaveform)
+  window.addEventListener('resize', () => {
+    setTimeout(() => drawWaveform(), 0)
+  })
 })
 </script>
