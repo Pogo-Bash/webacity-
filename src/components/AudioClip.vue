@@ -114,6 +114,15 @@ function selectClip() {
   audioStore.selectedTrackId = props.trackId
 }
 
+// Draw visualization based on view mode
+function draw() {
+  if (audioStore.viewMode === 'spectrogram') {
+    drawSpectrogram()
+  } else {
+    drawWaveform()
+  }
+}
+
 // Draw waveform
 function drawWaveform() {
   const canvas = waveformCanvas.value
@@ -155,6 +164,80 @@ function drawWaveform() {
   ctx.stroke()
 }
 
+// Draw spectrogram
+function drawSpectrogram() {
+  const canvas = waveformCanvas.value
+  if (!canvas || !props.clip.buffer) return
+
+  const ctx = canvas.getContext('2d')
+  const dpr = window.devicePixelRatio || 1
+  const rect = canvas.getBoundingClientRect()
+
+  canvas.width = rect.width * dpr
+  canvas.height = rect.height * dpr
+
+  ctx.scale(dpr, dpr)
+
+  // Clear canvas
+  ctx.clearRect(0, 0, rect.width, rect.height)
+
+  // Generate spectrogram data
+  const spectrogramData = audioStore.analyzer.generateSpectrogram(props.clip.buffer, 512, 256)
+  const { data, width, height } = spectrogramData
+
+  // Draw spectrogram
+  const cellWidth = rect.width / width
+  const cellHeight = rect.height / height
+
+  for (let x = 0; x < width; x++) {
+    const spectrum = data[x]
+    if (!spectrum) continue
+
+    for (let y = 0; y < height; y++) {
+      // Get magnitude (frequency bin value)
+      const magnitude = spectrum[y] || 0
+
+      // Convert magnitude to dB scale for better visualization
+      const db = 20 * Math.log10(magnitude + 1e-10)
+      const normalized = Math.max(0, Math.min(1, (db + 100) / 100))
+
+      // Color gradient: blue -> cyan -> yellow -> red
+      let r, g, b
+      if (normalized < 0.25) {
+        // Blue to cyan
+        const t = normalized / 0.25
+        r = 0
+        g = Math.floor(t * 128)
+        b = 255
+      } else if (normalized < 0.5) {
+        // Cyan to green
+        const t = (normalized - 0.25) / 0.25
+        r = 0
+        g = Math.floor(128 + t * 127)
+        b = Math.floor(255 * (1 - t))
+      } else if (normalized < 0.75) {
+        // Green to yellow
+        const t = (normalized - 0.5) / 0.25
+        r = Math.floor(t * 255)
+        g = 255
+        b = 0
+      } else {
+        // Yellow to red
+        const t = (normalized - 0.75) / 0.25
+        r = 255
+        g = Math.floor(255 * (1 - t))
+        b = 0
+      }
+
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
+
+      // Draw from bottom up (low frequencies at bottom, high at top)
+      const drawY = rect.height - (y + 1) * cellHeight
+      ctx.fillRect(x * cellWidth, drawY, Math.ceil(cellWidth), Math.ceil(cellHeight))
+    }
+  }
+}
+
 // Drag and drop handlers
 function onDragStart(event) {
   event.dataTransfer.effectAllowed = 'move'
@@ -177,7 +260,7 @@ function onDragEnd(event) {
 watch(
   () => props.clip,
   () => {
-    setTimeout(() => drawWaveform(), 0)
+    setTimeout(() => draw(), 0)
   },
   { deep: true }
 )
@@ -186,16 +269,24 @@ watch(
 watch(
   () => props.projectDuration,
   () => {
-    setTimeout(() => drawWaveform(), 0)
+    setTimeout(() => draw(), 0)
+  }
+)
+
+// Watch for view mode changes
+watch(
+  () => audioStore.viewMode,
+  () => {
+    setTimeout(() => draw(), 0)
   }
 )
 
 onMounted(() => {
   // Delay initial draw to ensure element is sized
-  setTimeout(() => drawWaveform(), 100)
+  setTimeout(() => draw(), 100)
   // Redraw on window resize
   window.addEventListener('resize', () => {
-    setTimeout(() => drawWaveform(), 0)
+    setTimeout(() => draw(), 0)
   })
 })
 </script>
