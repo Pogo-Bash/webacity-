@@ -93,11 +93,170 @@ export class MoveClipCommand {
   }
 
   execute() {
-    this.audioStore.moveClip(this.clipId, this.fromTrackId, this.toTrackId, this.newStartTime)
+    const fromTrack = this.audioStore.tracks.find(t => t.id === this.fromTrackId)
+    const toTrack = this.audioStore.tracks.find(t => t.id === this.toTrackId)
+    if (!fromTrack || !toTrack) return
+
+    const clipIndex = fromTrack.clips.findIndex(c => c.id === this.clipId)
+    if (clipIndex === -1) return
+
+    const clip = fromTrack.clips[clipIndex]
+
+    // If moving to different track
+    if (this.fromTrackId !== this.toTrackId) {
+      // Remove from old track
+      fromTrack.clips.splice(clipIndex, 1)
+      fromTrack.clips = [...fromTrack.clips]
+
+      // Add to new track
+      clip.startTime = this.newStartTime
+      clip.color = toTrack.color
+      toTrack.clips.push(clip)
+      toTrack.clips = [...toTrack.clips]
+
+      // Update both tracks
+      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
+      this.audioStore.updateTrackBufferFromClips(this.toTrackId)
+    } else {
+      // Just update position on same track
+      clip.startTime = this.newStartTime
+      fromTrack.clips = [...fromTrack.clips]
+      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
+    }
+
+    this.audioStore.updateDuration()
+    console.log(`📍 Moved clip to ${this.newStartTime.toFixed(2)}s`)
   }
 
   undo() {
-    this.audioStore.moveClip(this.clipId, this.toTrackId, this.fromTrackId, this.oldStartTime)
+    const fromTrack = this.audioStore.tracks.find(t => t.id === this.toTrackId)
+    const toTrack = this.audioStore.tracks.find(t => t.id === this.fromTrackId)
+    if (!fromTrack || !toTrack) return
+
+    const clipIndex = fromTrack.clips.findIndex(c => c.id === this.clipId)
+    if (clipIndex === -1) return
+
+    const clip = fromTrack.clips[clipIndex]
+
+    // If moved between different tracks, move back
+    if (this.fromTrackId !== this.toTrackId) {
+      // Remove from current track
+      fromTrack.clips.splice(clipIndex, 1)
+      fromTrack.clips = [...fromTrack.clips]
+
+      // Add back to original track
+      clip.startTime = this.oldStartTime
+      clip.color = toTrack.color
+      toTrack.clips.push(clip)
+      toTrack.clips = [...toTrack.clips]
+
+      // Update both tracks
+      this.audioStore.updateTrackBufferFromClips(this.toTrackId)
+      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
+    } else {
+      // Just restore position on same track
+      clip.startTime = this.oldStartTime
+      fromTrack.clips = [...fromTrack.clips]
+      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
+    }
+
+    this.audioStore.updateDuration()
+    console.log(`↩️ Moved clip back to ${this.oldStartTime.toFixed(2)}s`)
+  }
+}
+
+/**
+ * Cut clip (copy + delete with undo support)
+ */
+export class CutClipCommand {
+  constructor(audioStore, clipId) {
+    this.audioStore = audioStore
+    this.clipId = clipId
+    this.deleteCommand = null
+  }
+
+  execute() {
+    // Find and copy clip to clipboard
+    const clipData = this.audioStore.findClipById(this.clipId)
+    if (!clipData) return
+
+    const { clip } = clipData
+
+    // Copy to clipboard
+    this.audioStore.clipboard = {
+      buffer: clip.buffer,
+      duration: clip.duration,
+      name: clip.name,
+      color: clip.color
+    }
+
+    // Delete the clip (creates delete command internally)
+    this.deleteCommand = new DeleteClipCommand(this.audioStore, this.clipId)
+    this.deleteCommand.execute()
+
+    console.log(`✂️ Cut clip "${clip.name}"`)
+  }
+
+  undo() {
+    if (this.deleteCommand) {
+      this.deleteCommand.undo()
+      // Clear clipboard
+      this.audioStore.clipboard = null
+      console.log(`↩️ Undid cut`)
+    }
+  }
+}
+
+/**
+ * Paste clip from clipboard
+ */
+export class PasteClipCommand {
+  constructor(audioStore, trackId, position) {
+    this.audioStore = audioStore
+    this.trackId = trackId
+    this.position = position
+    this.clipId = null
+    this.clipboardData = null
+  }
+
+  execute() {
+    if (!this.audioStore.clipboard) return
+
+    // Save clipboard data
+    this.clipboardData = { ...this.audioStore.clipboard }
+
+    // Add clip to track
+    const clip = this.audioStore.addClipToTrack(
+      this.trackId,
+      this.clipboardData.buffer,
+      this.position,
+      this.clipboardData.name || 'Pasted Clip'
+    )
+
+    if (clip) {
+      if (this.clipboardData.color) {
+        clip.color = this.clipboardData.color
+      }
+      this.clipId = clip.id
+      this.audioStore.selectedClipId = clip.id
+      console.log(`📋 Pasted clip at ${this.position.toFixed(2)}s`)
+    }
+  }
+
+  undo() {
+    if (this.clipId && this.trackId) {
+      const track = this.audioStore.tracks.find(t => t.id === this.trackId)
+      if (!track) return
+
+      const clipIndex = track.clips.findIndex(c => c.id === this.clipId)
+      if (clipIndex !== -1) {
+        track.clips.splice(clipIndex, 1)
+        track.clips = [...track.clips]
+        this.audioStore.updateTrackBufferFromClips(this.trackId)
+        this.audioStore.updateDuration()
+        console.log(`↩️ Removed pasted clip`)
+      }
+    }
   }
 }
 

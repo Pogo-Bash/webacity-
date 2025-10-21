@@ -6,6 +6,7 @@ import AudioGenerators from '../audio/AudioGenerators'
 import AdvancedEffects from '../audio/AdvancedEffects'
 import AudioAnalyzer from '../audio/AudioAnalyzer'
 import { useHistoryStore } from './historyStore'
+import { DeleteClipCommand, MoveClipCommand, CutClipCommand, PasteClipCommand } from '../utils/commands'
 
 export const useAudioStore = defineStore('audio', {
   state: () => ({
@@ -457,6 +458,23 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Find clip by ID across all tracks (helper for commands)
+     */
+    findClipById(clipId) {
+      for (const track of this.tracks) {
+        const clipIndex = track.clips.findIndex(c => c.id === clipId)
+        if (clipIndex !== -1) {
+          return {
+            clip: track.clips[clipIndex],
+            trackId: track.id,
+            clipIndex
+          }
+        }
+      }
+      return null
+    },
+
+    /**
      * Copy selected clip to clipboard
      */
     copyClip() {
@@ -482,13 +500,17 @@ export const useAudioStore = defineStore('audio', {
      * Cut selected clip (copy + delete)
      */
     cutClip() {
-      if (!this.copyClip()) return false
+      if (!this.selectedClipId) return false
 
       const clipData = this.selectedClip
       if (!clipData) return false
 
-      const { trackId } = clipData
-      return this.removeClip(trackId, this.selectedClipId)
+      const historyStore = useHistoryStore()
+      const command = new CutClipCommand(this, this.selectedClipId)
+      historyStore.execute(command)
+
+      this.selectedClipId = null
+      return true
     },
 
     /**
@@ -497,16 +519,14 @@ export const useAudioStore = defineStore('audio', {
     pasteClip() {
       if (!this.clipboard || !this.selectedTrackId) return false
 
+      const historyStore = useHistoryStore()
       const position = this.currentTime
-      const clip = this.addClipToTrack(this.selectedTrackId, this.clipboard.buffer, position, 'Pasted Clip')
 
-      if (clip) {
-        this.selectedClipId = clip.id
-        console.log(`Pasted clip at ${position.toFixed(2)}s`)
-        return true
-      }
+      const command = new PasteClipCommand(this, this.selectedTrackId, position)
+      historyStore.execute(command)
 
-      return false
+      console.log(`Pasted clip at ${position.toFixed(2)}s`)
+      return true
     },
 
     /**
@@ -518,14 +538,12 @@ export const useAudioStore = defineStore('audio', {
       const clipData = this.selectedClip
       if (!clipData) return false
 
-      const { trackId } = clipData
-      const success = this.removeClip(trackId, this.selectedClipId)
+      const historyStore = useHistoryStore()
+      const command = new DeleteClipCommand(this, this.selectedClipId)
+      historyStore.execute(command)
 
-      if (success) {
-        this.selectedClipId = null
-      }
-
-      return success
+      this.selectedClipId = null
+      return true
     },
 
     /**
@@ -1247,33 +1265,24 @@ export const useAudioStore = defineStore('audio', {
       if (clipIndex === -1) return false
 
       const clip = fromTrack.clips[clipIndex]
+      const oldStartTime = clip.startTime
 
       // Snap to grid if enabled
       if (this.timelineSnapInterval > 0) {
         newStartTime = Math.round(newStartTime / this.timelineSnapInterval) * this.timelineSnapInterval
       }
 
-      // If moving to different track
-      if (fromTrackId !== toTrackId) {
-        const toTrack = this.tracks.find(t => t.id === toTrackId)
-        if (!toTrack) return false
+      const historyStore = useHistoryStore()
+      const command = new MoveClipCommand(
+        this,
+        clipId,
+        fromTrackId,
+        toTrackId,
+        oldStartTime,
+        Math.max(0, newStartTime)
+      )
+      historyStore.execute(command)
 
-        // Remove from old track
-        fromTrack.clips.splice(clipIndex, 1)
-        this.updateTrackBufferFromClips(fromTrackId)
-
-        // Add to new track
-        clip.startTime = Math.max(0, newStartTime)
-        clip.color = toTrack.color
-        toTrack.clips.push(clip)
-        this.updateTrackBufferFromClips(toTrackId)
-      } else {
-        // Just moving position within same track
-        clip.startTime = Math.max(0, newStartTime)
-        this.updateTrackBufferFromClips(fromTrackId)
-      }
-
-      this.updateDuration()
       return true
     },
 
