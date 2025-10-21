@@ -48,6 +48,28 @@
             </div>
             <input type="range" min="0" max="1" step="0.01" v-model.number="tone.amplitude" class="w-full mt-1" />
           </div>
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-gray-400">Preview Volume</label>
+              <span class="text-xs text-white">{{ (previewVolume * 100).toFixed(0) }}%</span>
+            </div>
+            <input type="range" min="0" max="1" step="0.01" v-model.number="previewVolume" class="w-full mt-1" />
+          </div>
+          <div class="flex gap-2">
+            <button @click="previewTone" class="btn-preview flex-1">
+              <svg class="w-4 h-4 mr-1 inline" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+              Preview
+            </button>
+            <button v-if="isPreviewing" @click="stopPreview" class="btn-stop flex-1">
+              <svg class="w-4 h-4 mr-1 inline" fill="currentColor" viewBox="0 0 24 24">
+                <rect x="6" y="4" width="4" height="16"/>
+                <rect x="14" y="4" width="4" height="16"/>
+              </svg>
+              Stop
+            </button>
+          </div>
           <button @click="generateTone" class="btn-apply">Generate Tone</button>
         </div>
       </div>
@@ -183,6 +205,13 @@ const silence = ref({
   duration: 1
 })
 
+// Preview state
+const previewVolume = ref(0.3)
+const isPreviewing = ref(false)
+let previewAudioContext = null
+let previewSource = null
+let previewGain = null
+
 async function generateTone() {
   try {
     await audioStore.init()
@@ -239,6 +268,79 @@ async function generateSilence() {
     alert('Failed to generate silence')
   }
 }
+
+// Preview Functions
+function initPreviewContext() {
+  if (!previewAudioContext) {
+    previewAudioContext = new (window.AudioContext || window.webkitAudioContext)()
+    previewGain = previewAudioContext.createGain()
+    previewGain.connect(previewAudioContext.destination)
+  }
+}
+
+function stopPreview() {
+  if (previewSource) {
+    try {
+      previewSource.stop()
+      previewSource.disconnect()
+    } catch (e) {
+      // Already stopped
+    }
+    previewSource = null
+  }
+  isPreviewing.value = false
+}
+
+async function previewTone() {
+  stopPreview()
+  initPreviewContext()
+
+  try {
+    // Create buffer for preview (limit to 2 seconds for quick preview)
+    const previewDuration = Math.min(tone.value.duration, 2)
+    const buffer = previewAudioContext.createBuffer(
+      1,
+      previewAudioContext.sampleRate * previewDuration,
+      previewAudioContext.sampleRate
+    )
+    const data = buffer.getChannelData(0)
+
+    // Generate waveform
+    const freq = tone.value.frequency
+    for (let i = 0; i < buffer.length; i++) {
+      const t = i / buffer.sampleRate
+      let sample = 0
+
+      switch (tone.value.waveform) {
+        case 'sine':
+          sample = Math.sin(2 * Math.PI * freq * t)
+          break
+        case 'square':
+          sample = Math.sign(Math.sin(2 * Math.PI * freq * t))
+          break
+        case 'sawtooth':
+          sample = 2 * ((freq * t) % 1) - 1
+          break
+      }
+
+      data[i] = sample * tone.value.amplitude
+    }
+
+    // Play preview
+    previewSource = previewAudioContext.createBufferSource()
+    previewSource.buffer = buffer
+    previewGain.gain.value = previewVolume.value
+    previewSource.connect(previewGain)
+    previewSource.onended = () => {
+      isPreviewing.value = false
+    }
+    previewSource.start()
+    isPreviewing.value = true
+  } catch (error) {
+    console.error('Preview failed:', error)
+    isPreviewing.value = false
+  }
+}
 </script>
 
 <style scoped>
@@ -272,6 +374,14 @@ input[type="range"]::-moz-range-thumb {
 
 .btn-apply {
   @apply w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded transition-colors;
+}
+
+.btn-preview {
+  @apply px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors;
+}
+
+.btn-stop {
+  @apply px-3 py-2 bg-red-600 hover:bg-red-700 text-white text-sm rounded transition-colors;
 }
 
 select {

@@ -18,6 +18,7 @@ export const useAudioStore = defineStore('audio', {
     selectedTrackId: null,
     selection: null, // { trackId, startTime, endTime }
     clipboard: null, // { buffer, duration }
+    snippets: [], // { id, name, buffer, duration, waveformData }
     isPlaying: false,
     isRecording: false,
     recordingLevel: 0,
@@ -120,10 +121,26 @@ export const useAudioStore = defineStore('audio', {
     removeTrack(trackId) {
       const index = this.tracks.findIndex(t => t.id === trackId)
       if (index !== -1) {
+        // Remove from engine first to stop playback
+        if (this.engine) {
+          this.engine.removeTrack(trackId)
+        }
+
+        // Remove from store
         this.tracks.splice(index, 1)
+
+        // Update selected track
         if (this.selectedTrackId === trackId) {
           this.selectedTrackId = this.tracks.length > 0 ? this.tracks[0].id : null
         }
+
+        // Clear selection if it was on this track
+        if (this.selection && this.selection.trackId === trackId) {
+          this.clearSelection()
+        }
+
+        // Update duration
+        this.updateDuration()
       }
     },
 
@@ -707,6 +724,127 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Create snippet from selection
+     */
+    createSnippetFromSelection(name = null) {
+      if (!this.selection) return null
+
+      const track = this.tracks.find(t => t.id === this.selection.trackId)
+      if (!track || !track.buffer) return null
+
+      const { startTime, endTime } = this.selection
+      const duration = endTime - startTime
+
+      // Extract the audio region
+      const sampleRate = track.buffer.sampleRate
+      const startSample = Math.floor(startTime * sampleRate)
+      const endSample = Math.floor(endTime * sampleRate)
+      const length = endSample - startSample
+
+      // Create new buffer for snippet
+      const snippetBuffer = this.engine.audioContext.createBuffer(
+        track.buffer.numberOfChannels,
+        length,
+        sampleRate
+      )
+
+      // Copy audio data
+      for (let channel = 0; channel < track.buffer.numberOfChannels; channel++) {
+        const sourceData = track.buffer.getChannelData(channel)
+        const snippetData = snippetBuffer.getChannelData(channel)
+        for (let i = 0; i < length; i++) {
+          snippetData[i] = sourceData[startSample + i]
+        }
+      }
+
+      // Create snippet object
+      const snippetId = `snippet_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const snippetName = name || `Snippet ${this.snippets.length + 1}`
+
+      const snippet = {
+        id: snippetId,
+        name: snippetName,
+        buffer: snippetBuffer,
+        duration,
+        waveformData: this.generateWaveformData(snippetBuffer)
+      }
+
+      this.snippets.push(snippet)
+      return snippet
+    },
+
+    /**
+     * Place snippet into track at position
+     */
+    placeSnippet(snippetId, trackId, position = 0) {
+      const snippet = this.snippets.find(s => s.id === snippetId)
+      if (!snippet) return false
+
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track || !track.buffer) return false
+
+      const sampleRate = track.buffer.sampleRate
+      const positionSample = Math.floor(position * sampleRate)
+
+      // Calculate new buffer size
+      const snippetLength = snippet.buffer.length
+      const newLength = Math.max(
+        track.buffer.length,
+        positionSample + snippetLength
+      )
+
+      // Create new buffer
+      const newBuffer = this.engine.audioContext.createBuffer(
+        track.buffer.numberOfChannels,
+        newLength,
+        sampleRate
+      )
+
+      // Copy original track data
+      for (let channel = 0; channel < track.buffer.numberOfChannels; channel++) {
+        const sourceData = track.buffer.getChannelData(channel)
+        const destData = newBuffer.getChannelData(channel)
+
+        for (let i = 0; i < track.buffer.length; i++) {
+          destData[i] = sourceData[i]
+        }
+
+        // Mix in snippet data
+        const snippetData = snippet.buffer.getChannelData(
+          Math.min(channel, snippet.buffer.numberOfChannels - 1)
+        )
+        for (let i = 0; i < snippetLength; i++) {
+          const destIndex = positionSample + i
+          if (destIndex < newLength) {
+            // Mix audio (average if overlapping)
+            destData[destIndex] = (destData[destIndex] + snippetData[i]) / 2
+          }
+        }
+      }
+
+      // Update track
+      track.buffer = newBuffer
+      track.duration = newBuffer.duration
+      track.waveformData = this.generateWaveformData(newBuffer)
+      this.engine.setTrackBuffer(trackId, newBuffer)
+      this.updateDuration()
+
+      return true
+    },
+
+    /**
+     * Remove snippet
+     */
+    removeSnippet(snippetId) {
+      const index = this.snippets.findIndex(s => s.id === snippetId)
+      if (index !== -1) {
+        this.snippets.splice(index, 1)
+        return true
+      }
+      return false
+    },
+
+    /**
      * Reset project
      */
     reset() {
@@ -719,6 +857,7 @@ export const useAudioStore = defineStore('audio', {
       this.selectedTrackId = null
       this.selection = null
       this.clipboard = null
+      this.snippets = []
       this.currentTime = 0
       this.duration = 0
       this.projectName = 'Untitled Project'

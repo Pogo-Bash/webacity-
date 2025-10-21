@@ -123,6 +123,37 @@ class AudioEngine {
   }
 
   /**
+   * Remove a track and cleanup its resources
+   */
+  removeTrack(trackId) {
+    const track = this.tracks.get(trackId);
+    if (!track) return false;
+
+    // Stop any playing source
+    if (track.source) {
+      try {
+        track.source.stop();
+        track.source.disconnect();
+      } catch (e) {
+        // Source may already be stopped
+      }
+      track.source = null;
+    }
+
+    // Disconnect audio nodes
+    try {
+      track.gainNode.disconnect();
+      track.panNode.disconnect();
+    } catch (e) {
+      // Nodes may already be disconnected
+    }
+
+    // Remove from tracks map
+    this.tracks.delete(trackId);
+    return true;
+  }
+
+  /**
    * Play a specific track
    */
   playTrack(trackId, startTime = 0) {

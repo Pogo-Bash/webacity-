@@ -17,6 +17,7 @@
     <Toolbar
       @toggle-effects="showEffects = !showEffects"
       @toggle-generator="showGenerator = !showGenerator"
+      @toggle-snippets="showSnippets = !showSnippets"
     />
 
     <!-- Timeline -->
@@ -67,6 +68,9 @@
     <!-- Generator Panel -->
     <GeneratorPanel :visible="showGenerator" @close="showGenerator = false" />
 
+    <!-- Snippet Panel -->
+    <SnippetPanel :visible="showSnippets" @close="showSnippets = false" />
+
     <!-- Footer -->
     <footer class="bg-gray-900 border-t border-gray-700 px-6 py-2 text-xs text-gray-500">
       <div class="flex items-center justify-between">
@@ -109,6 +113,7 @@ import Timeline from './components/Timeline.vue'
 import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
 import GeneratorPanel from './components/GeneratorPanel.vue'
+import SnippetPanel from './components/SnippetPanel.vue'
 
 const audioStore = useAudioStore()
 const historyStore = useHistoryStore()
@@ -116,6 +121,7 @@ const { tracks, selectedTrack } = storeToRefs(audioStore)
 
 const showEffects = ref(false)
 const showGenerator = ref(false)
+const showSnippets = ref(false)
 const fileInput = ref(null)
 
 onMounted(async () => {
@@ -245,6 +251,12 @@ function handleKeyDown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'g') {
     e.preventDefault()
     showGenerator.value = !showGenerator.value
+  }
+
+  // Ctrl/Cmd + S: Toggle Snippets
+  if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+    e.preventDefault()
+    showSnippets.value = !showSnippets.value
   }
 }
 

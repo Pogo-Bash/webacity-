@@ -49,6 +49,8 @@
         @mousemove="updateSelection"
         @mouseup="endSelection"
         @mouseleave="endSelection"
+        @dragover.prevent="handleDragOver"
+        @drop.prevent="handleDrop"
       ></canvas>
 
       <!-- Selection overlay -->
@@ -273,6 +275,25 @@ function endSelection() {
       audioStore.clearSelection()
     }
   }
+}
+
+function handleDragOver(e) {
+  e.dataTransfer.dropEffect = 'copy'
+}
+
+function handleDrop(e) {
+  const snippetId = e.dataTransfer.getData('application/snippet-id')
+  if (!snippetId) return
+
+  // Calculate position from drop location
+  const rect = waveformCanvas.value.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const duration = props.track.duration || 0
+  const position = (x / rect.width) * duration
+
+  // Place snippet at position
+  audioStore.placeSnippet(snippetId, props.track.id, position)
+  console.log(`Placed snippet at ${position.toFixed(2)}s in track ${props.track.name}`)
 }
 
 function formatDuration(seconds) {
