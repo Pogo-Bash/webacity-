@@ -1,12 +1,5 @@
 <template>
-  <div class="app-container h-screen w-screen flex flex-col bg-darker text-gray-100 relative">
-    <!-- Global Playhead Overlay -->
-    <div
-      v-if="tracks.length > 0 && audioStore.duration > 0"
-      class="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-50"
-      :style="{ left: playheadPosition + 'px' }"
-    ></div>
-
+  <div class="app-container h-screen w-screen flex flex-col bg-darker text-gray-100">
     <!-- Header -->
     <header class="bg-gray-900 border-b border-gray-700 px-6 py-3">
       <div class="flex items-center justify-between">
@@ -32,6 +25,13 @@
 
     <!-- Main Content Area -->
     <main class="flex-1 overflow-y-auto p-4 relative" ref="mainContent">
+      <!-- Global Playhead -->
+      <div
+        v-if="tracks.length > 0 && duration > 0"
+        class="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-50"
+        :style="{ left: mainPlayheadPosition + 'px' }"
+      ></div>
+
       <!-- Tracks -->
       <div v-if="tracks.length > 0" class="space-y-4">
         <Track
@@ -134,21 +134,21 @@ const showGenerator = ref(false)
 const showSettings = ref(false)
 const fileInput = ref(null)
 
-// Calculate playhead position for global overlay
-const playheadPosition = computed(() => {
+// Calculate playhead position for main content area
+const mainPlayheadPosition = computed(() => {
   // Use refs from storeToRefs for reactivity
   const time = currentTime.value
   const dur = duration.value
 
-  if (!timeline.value || dur === 0) return 0
+  if (!mainContent.value || dur === 0) return 0
 
-  // Get the timeline ruler element from the Timeline component
-  const timelineEl = timeline.value.$el?.querySelector('.timeline-container')
-  if (!timelineEl) return 0
+  // Get the width of main content (minus padding)
+  const rect = mainContent.value.getBoundingClientRect()
+  const padding = 16 // p-4 = 1rem = 16px
+  const contentWidth = rect.width - (padding * 2)
 
-  const rect = timelineEl.getBoundingClientRect()
   const ratio = time / dur
-  return rect.left + (rect.width * ratio)
+  return padding + (ratio * contentWidth)
 })
 
 onMounted(async () => {

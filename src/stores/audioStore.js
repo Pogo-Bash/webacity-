@@ -575,6 +575,93 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Apply effect to selected clip
+     */
+    async applyEffectToClip(effectName, params) {
+      if (!this.selectedClipId) {
+        console.log('No clip selected for effect')
+        return false
+      }
+
+      const clipData = this.selectedClip
+      if (!clipData) return false
+
+      const { clip, trackId } = clipData
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track) return false
+
+      try {
+        const channelData = clip.buffer.getChannelData(0)
+        let processedData
+
+        // Apply effect using WASM bridge
+        switch (effectName) {
+          case 'amplify':
+            processedData = this.wasmBridge.amplify(channelData, params.factor)
+            break
+          case 'normalize':
+            processedData = this.wasmBridge.normalize(channelData, params.targetPeak)
+            break
+          case 'fadeIn':
+            processedData = this.wasmBridge.fadeIn(channelData, params.samples)
+            break
+          case 'fadeOut':
+            processedData = this.wasmBridge.fadeOut(channelData, params.samples)
+            break
+          case 'reverse':
+            processedData = this.wasmBridge.reverse(channelData)
+            break
+          case 'lowPass':
+            processedData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
+            break
+          case 'highPass':
+            processedData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
+            break
+          case 'compress':
+            processedData = this.wasmBridge.compress(
+              channelData,
+              params.threshold,
+              params.ratio,
+              params.attack,
+              params.release
+            )
+            break
+          default:
+            console.warn('Unknown effect:', effectName)
+            return false
+        }
+
+        // Create new buffer with processed data
+        const newBuffer = this.engine.audioContext.createBuffer(
+          clip.buffer.numberOfChannels,
+          clip.buffer.length,
+          clip.buffer.sampleRate
+        )
+
+        // Copy processed data to new buffer
+        newBuffer.getChannelData(0).set(processedData)
+
+        // If stereo, copy/process other channels
+        for (let i = 1; i < clip.buffer.numberOfChannels; i++) {
+          newBuffer.getChannelData(i).set(clip.buffer.getChannelData(i))
+        }
+
+        // Update clip
+        clip.buffer = newBuffer
+        clip.waveformData = this.generateWaveformData(newBuffer)
+
+        // Rebuild track buffer from all clips
+        this.updateTrackBufferFromClips(trackId)
+
+        console.log(`Applied ${effectName} to clip "${clip.name}"`)
+        return true
+      } catch (error) {
+        console.error('Failed to apply effect to clip:', error)
+        throw error
+      }
+    },
+
+    /**
      * Apply effect to track (with selection support)
      */
     async applyEffectToTrack(trackId, effectName, params, selection = null) {

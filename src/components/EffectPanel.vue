@@ -216,8 +216,21 @@ const compRatio = ref(4)
 const compAttack = ref(0.005)
 const compRelease = ref(0.1)
 
-// Helper function to apply effects with undo support
+// Helper function to apply effects
 function applyEffectWithUndo(effectName, params) {
+  // If a clip is selected, apply effect to clip
+  if (audioStore.selectedClipId) {
+    try {
+      audioStore.applyEffectToClip(effectName, params)
+      console.log(`${effectName} applied to selected clip`)
+    } catch (error) {
+      console.error(`Failed to apply ${effectName} to clip:`, error)
+      alert('Failed to apply effect to clip')
+    }
+    return
+  }
+
+  // Otherwise apply to track (old behavior)
   if (!selectedTrack.value) return
   try {
     const command = new ApplyEffectCommand(
