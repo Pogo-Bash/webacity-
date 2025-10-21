@@ -357,9 +357,9 @@ function handleRecord() {
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1.5rem;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #111827;
+  border-bottom: 1px solid #374151;
   color: white;
-  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
   z-index: 1000;
 }
 
@@ -369,11 +369,10 @@ function handleRecord() {
   gap: 0.75rem;
   font-size: 1.25rem;
   font-weight: 700;
-  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 .logo svg {
-  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+  color: #3b82f6;
 }
 
 .logo-text {
@@ -384,8 +383,8 @@ function handleRecord() {
 }
 
 .hamburger-btn {
-  background: rgba(255, 255, 255, 0.1);
-  border: 2px solid rgba(255, 255, 255, 0.2);
+  background: #1f2937;
+  border: 1px solid #374151;
   border-radius: 0.5rem;
   padding: 0.5rem;
   cursor: pointer;
@@ -393,12 +392,13 @@ function handleRecord() {
 }
 
 .hamburger-btn:hover {
-  background: rgba(255, 255, 255, 0.2);
-  transform: scale(1.05);
+  background: #374151;
+  border-color: #4b5563;
 }
 
 .hamburger-btn.active {
-  background: rgba(255, 255, 255, 0.3);
+  background: #3b82f6;
+  border-color: #3b82f6;
 }
 
 .hamburger-icon {
@@ -490,7 +490,7 @@ function handleRecord() {
 }
 
 .menu-item:hover:not(:disabled) {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: #374151;
   transform: translateX(4px);
 }
 
