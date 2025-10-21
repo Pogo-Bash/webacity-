@@ -42,21 +42,33 @@
 
     <!-- Waveform Display -->
     <div
+      ref="trackContainer"
       class="relative bg-gray-900 h-32"
       :class="{ 'ring-2 ring-blue-500': isDraggingOver }"
+      @dragover.prevent="handleDragOver"
+      @dragleave="handleDragLeave"
+      @drop.prevent="handleDrop"
     >
+      <!-- Background waveform (mixed) - dimmed -->
       <canvas
         ref="waveformCanvas"
-        class="waveform-canvas w-full h-full"
+        class="waveform-canvas w-full h-full opacity-30"
         @mousedown="startSelection"
         @mousemove="updateSelection"
         @mouseup="endSelection"
         @mouseleave="endSelection"
-        @dragover.prevent="handleDragOver"
-        @dragleave="handleDragLeave"
-        @drop.prevent="handleDrop"
         @contextmenu.prevent="handleContextMenu"
       ></canvas>
+
+      <!-- Audio clips -->
+      <AudioClip
+        v-for="clip in track.clips"
+        :key="clip.id"
+        :clip="clip"
+        :track-id="track.id"
+        :project-duration="audioStore.duration || 1"
+        @delete="deleteClip"
+      />
 
       <!-- Selection overlay -->
       <div
@@ -69,6 +81,13 @@
       <div
         v-if="isDraggingOver"
         class="absolute top-0 bottom-0 bg-blue-500 bg-opacity-30 pointer-events-none"
+      ></div>
+
+      <!-- Snap guide line -->
+      <div
+        v-if="snapGuidePosition !== null"
+        class="absolute top-0 bottom-0 w-0.5 bg-yellow-400 pointer-events-none"
+        :style="{ left: snapGuidePosition + 'px' }"
       ></div>
     </div>
 
@@ -132,6 +151,7 @@
 import { ref, onMounted, watch, computed } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
 import ContextMenu from './ContextMenu.vue'
+import AudioClip from './AudioClip.vue'
 
 const props = defineProps({
   track: {
@@ -143,10 +163,12 @@ const props = defineProps({
 const audioStore = useAudioStore()
 const waveformCanvas = ref(null)
 const timeMarkerCanvas = ref(null)
+const trackContainer = ref(null)
 const volume = ref(props.track.volume)
 const pan = ref(props.track.pan)
 const isSelecting = ref(false)
 const isDraggingOver = ref(false)
+const snapGuidePosition = ref(null)
 const showContextMenu = ref(false)
 const contextMenuPosition = ref({ x: 0, y: 0 })
 
@@ -404,34 +426,94 @@ function handleEffectFromMenu(effectName) {
 }
 
 function handleDragOver(e) {
-  e.dataTransfer.dropEffect = 'copy'
   isDraggingOver.value = true
+
+  const type = e.dataTransfer.types.includes('type') ? e.dataTransfer.getData('type') : null
+
+  if (type === 'audio-clip') {
+    e.dataTransfer.dropEffect = 'move'
+
+    // Show snap guide
+    const rect = trackContainer.value.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const projectDuration = audioStore.duration || 1
+    const time = (x / rect.width) * projectDuration
+
+    // Snap to grid
+    const snapInterval = audioStore.timelineSnapInterval || 1
+    const snappedTime = Math.round(time / snapInterval) * snapInterval
+    snapGuidePosition.value = (snappedTime / projectDuration) * rect.width
+  } else {
+    e.dataTransfer.dropEffect = 'copy'
+  }
 }
 
 function handleDragLeave(e) {
   isDraggingOver.value = false
+  snapGuidePosition.value = null
 }
 
 function handleDrop(e) {
   isDraggingOver.value = false
-  const snippetId = e.dataTransfer.getData('application/snippet-id')
-  if (!snippetId) {
-    console.log('No snippet ID in drop event')
+  snapGuidePosition.value = null
+
+  const type = e.dataTransfer.getData('type')
+
+  // Handle clip drop (moving between tracks or within track)
+  if (type === 'audio-clip') {
+    const clipId = e.dataTransfer.getData('clipId')
+    const fromTrackId = e.dataTransfer.getData('trackId')
+    const offsetX = parseFloat(e.dataTransfer.getData('offsetX'))
+
+    if (!clipId || !fromTrackId) {
+      console.log('No clip ID or track ID in drop event')
+      return
+    }
+
+    // Calculate new position from drop location
+    const rect = trackContainer.value.getBoundingClientRect()
+    const dropX = e.clientX - rect.left - offsetX // Account for where user grabbed the clip
+    const projectDuration = audioStore.duration || 1
+    let newStartTime = (dropX / rect.width) * projectDuration
+
+    // Ensure it's not negative
+    newStartTime = Math.max(0, newStartTime)
+
+    // Move the clip
+    const success = audioStore.moveClip(clipId, fromTrackId, props.track.id, newStartTime)
+    if (success) {
+      console.log(`✓ Moved clip to ${newStartTime.toFixed(2)}s in track ${props.track.name}`)
+    } else {
+      console.error('Failed to move clip')
+    }
     return
   }
 
-  // Calculate position from drop location
-  const rect = waveformCanvas.value.getBoundingClientRect()
-  const x = e.clientX - rect.left
-  const duration = props.track.duration || 1 // Use 1 second as default for empty tracks
-  const position = (x / rect.width) * duration
+  // Handle snippet drop (creating new clip from snippet)
+  const snippetId = e.dataTransfer.getData('application/snippet-id')
+  if (snippetId) {
+    // Calculate position from drop location
+    const rect = trackContainer.value.getBoundingClientRect()
+    const x = e.clientX - rect.left
+    const duration = props.track.duration || 1
+    const position = (x / rect.width) * duration
 
-  // Place snippet at position
-  const success = audioStore.placeSnippet(snippetId, props.track.id, position)
-  if (success) {
-    console.log(`✓ Placed snippet at ${position.toFixed(2)}s in track ${props.track.name}`)
-  } else {
-    console.error('Failed to place snippet')
+    // Place snippet at position
+    const success = audioStore.placeSnippet(snippetId, props.track.id, position)
+    if (success) {
+      console.log(`✓ Placed snippet at ${position.toFixed(2)}s in track ${props.track.name}`)
+    } else {
+      console.error('Failed to place snippet')
+    }
+    return
+  }
+
+  console.log('Unknown drop type')
+}
+
+function deleteClip(clipId) {
+  if (confirm('Delete this clip?')) {
+    audioStore.removeClip(props.track.id, clipId)
   }
 }
 

@@ -107,7 +107,8 @@ export const useAudioStore = defineStore('audio', {
         muted: false,
         solo: false,
         waveformData: null,
-        color: this.getRandomTrackColor()
+        color: this.getRandomTrackColor(),
+        clips: [] // Array of audio clips: { id, buffer, startTime, duration, waveformData, color }
       }
 
       this.tracks.push(track)
@@ -160,16 +161,8 @@ export const useAudioStore = defineStore('audio', {
           targetTrackId = track.id
         }
 
-        this.engine.setTrackBuffer(targetTrackId, buffer)
-
-        const track = this.tracks.find(t => t.id === targetTrackId)
-        if (track) {
-          track.buffer = buffer
-          track.duration = buffer.duration
-          track.waveformData = this.generateWaveformData(buffer)
-        }
-
-        this.updateDuration()
+        // Add as a clip to the track
+        this.addClipToTrack(targetTrackId, buffer, 0, file.name)
 
         return targetTrackId
       } catch (error) {
@@ -619,11 +612,7 @@ export const useAudioStore = defineStore('audio', {
 
         // Create new track with recorded audio
         const track = this.addTrack('Recording')
-        track.buffer = audioBuffer
-        track.duration = audioBuffer.duration
-        this.engine.setTrackBuffer(track.id, audioBuffer)
-        track.waveformData = this.generateWaveformData(audioBuffer)
-        this.updateDuration()
+        this.addClipToTrack(track.id, audioBuffer, 0, 'Recording')
 
         console.log('Recording stopped, track created')
         return track.id
@@ -654,11 +643,7 @@ export const useAudioStore = defineStore('audio', {
       }
 
       const track = this.addTrack(`${waveform} ${frequency}Hz`)
-      track.buffer = buffer
-      track.duration = duration
-      this.engine.setTrackBuffer(track.id, buffer)
-      track.waveformData = this.generateWaveformData(buffer)
-      this.updateDuration()
+      this.addClipToTrack(track.id, buffer, 0, `${waveform} ${frequency}Hz`)
 
       return track.id
     },
@@ -684,11 +669,7 @@ export const useAudioStore = defineStore('audio', {
       }
 
       const track = this.addTrack(`${noiseType} noise`)
-      track.buffer = buffer
-      track.duration = duration
-      this.engine.setTrackBuffer(track.id, buffer)
-      track.waveformData = this.generateWaveformData(buffer)
-      this.updateDuration()
+      this.addClipToTrack(track.id, buffer, 0, `${noiseType} noise`)
 
       return track.id
     },
@@ -700,11 +681,7 @@ export const useAudioStore = defineStore('audio', {
       const buffer = this.generators.generateSilence(duration)
 
       const track = this.addTrack('Silence')
-      track.buffer = buffer
-      track.duration = duration
-      this.engine.setTrackBuffer(track.id, buffer)
-      track.waveformData = this.generateWaveformData(buffer)
-      this.updateDuration()
+      this.addClipToTrack(track.id, buffer, 0, 'Silence')
 
       return track.id
     },
@@ -716,11 +693,7 @@ export const useAudioStore = defineStore('audio', {
       const buffer = this.generators.generateChirp(startFreq, endFreq, duration, amplitude)
 
       const track = this.addTrack(`Chirp ${startFreq}-${endFreq}Hz`)
-      track.buffer = buffer
-      track.duration = duration
-      this.engine.setTrackBuffer(track.id, buffer)
-      track.waveformData = this.generateWaveformData(buffer)
-      this.updateDuration()
+      this.addClipToTrack(track.id, buffer, 0, `Chirp ${startFreq}-${endFreq}Hz`)
 
       return track.id
     },
@@ -809,7 +782,7 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Place snippet into track at position
+     * Place snippet into track at position (creates a new clip)
      */
     placeSnippet(snippetId, trackId, position = 0) {
       const snippet = this.snippets.find(s => s.id === snippetId)
@@ -818,96 +791,15 @@ export const useAudioStore = defineStore('audio', {
         return false
       }
 
-      const track = this.tracks.find(t => t.id === trackId)
-      if (!track) {
-        console.error('Track not found:', trackId)
-        return false
-      }
+      // Add snippet as a clip to the track
+      const clip = this.addClipToTrack(trackId, snippet.buffer, position, snippet.name)
 
-      const sampleRate = snippet.buffer.sampleRate
-      const positionSample = Math.floor(position * sampleRate)
-      const snippetLength = snippet.buffer.length
-
-      // If track is empty, create a buffer with the snippet at the specified position
-      if (!track.buffer) {
-        // Calculate buffer size: position + snippet length
-        const newLength = positionSample + snippetLength
-
-        // Create new buffer filled with silence
-        const newBuffer = this.engine.audioContext.createBuffer(
-          snippet.buffer.numberOfChannels,
-          newLength,
-          sampleRate
-        )
-
-        // Copy snippet data at the specified position
-        for (let channel = 0; channel < snippet.buffer.numberOfChannels; channel++) {
-          const destData = newBuffer.getChannelData(channel)
-          const snippetData = snippet.buffer.getChannelData(channel)
-
-          // Place snippet at position (buffer is already zeroed/silent)
-          for (let i = 0; i < snippetLength; i++) {
-            destData[positionSample + i] = snippetData[i]
-          }
-        }
-
-        // Update track
-        track.buffer = newBuffer
-        track.duration = newBuffer.duration
-        track.waveformData = this.generateWaveformData(newBuffer)
-        this.engine.setTrackBuffer(trackId, newBuffer)
-        this.updateDuration()
-        console.log('Placed snippet in empty track at position', position)
+      if (clip) {
+        console.log('Placed snippet as clip at position', position)
         return true
       }
 
-      // Track has existing audio - mix the snippet in
-      const positionSampleInTrack = Math.floor(position * track.buffer.sampleRate)
-
-      // Calculate new buffer size
-      const newLength = Math.max(
-        track.buffer.length,
-        positionSampleInTrack + snippetLength
-      )
-
-      // Create new buffer
-      const newBuffer = this.engine.audioContext.createBuffer(
-        track.buffer.numberOfChannels,
-        newLength,
-        track.buffer.sampleRate
-      )
-
-      // Copy original track data
-      for (let channel = 0; channel < track.buffer.numberOfChannels; channel++) {
-        const sourceData = track.buffer.getChannelData(channel)
-        const destData = newBuffer.getChannelData(channel)
-
-        for (let i = 0; i < track.buffer.length; i++) {
-          destData[i] = sourceData[i]
-        }
-
-        // Mix in snippet data
-        const snippetData = snippet.buffer.getChannelData(
-          Math.min(channel, snippet.buffer.numberOfChannels - 1)
-        )
-        for (let i = 0; i < snippetLength; i++) {
-          const destIndex = positionSampleInTrack + i
-          if (destIndex < newLength) {
-            // Mix audio (average if overlapping)
-            destData[destIndex] = (destData[destIndex] + snippetData[i]) / 2
-          }
-        }
-      }
-
-      // Update track
-      track.buffer = newBuffer
-      track.duration = newBuffer.duration
-      track.waveformData = this.generateWaveformData(newBuffer)
-      this.engine.setTrackBuffer(trackId, newBuffer)
-      this.updateDuration()
-
-      console.log('Placed snippet at position', position)
-      return true
+      return false
     },
 
     /**
@@ -920,6 +812,162 @@ export const useAudioStore = defineStore('audio', {
         return true
       }
       return false
+    },
+
+    /**
+     * Add clip to track
+     */
+    addClipToTrack(trackId, buffer, startTime = 0, name = null) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track) return null
+
+      const clipId = `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+      const clip = {
+        id: clipId,
+        name: name || `Clip ${track.clips.length + 1}`,
+        buffer,
+        startTime,
+        duration: buffer.duration,
+        waveformData: this.generateWaveformData(buffer),
+        color: track.color
+      }
+
+      track.clips.push(clip)
+      this.updateTrackBufferFromClips(trackId)
+      this.updateDuration()
+
+      return clip
+    },
+
+    /**
+     * Move clip to different track or position
+     */
+    moveClip(clipId, fromTrackId, toTrackId, newStartTime) {
+      const fromTrack = this.tracks.find(t => t.id === fromTrackId)
+      if (!fromTrack) return false
+
+      const clipIndex = fromTrack.clips.findIndex(c => c.id === clipId)
+      if (clipIndex === -1) return false
+
+      const clip = fromTrack.clips[clipIndex]
+
+      // Snap to grid if enabled
+      if (this.timelineSnapInterval > 0) {
+        newStartTime = Math.round(newStartTime / this.timelineSnapInterval) * this.timelineSnapInterval
+      }
+
+      // If moving to different track
+      if (fromTrackId !== toTrackId) {
+        const toTrack = this.tracks.find(t => t.id === toTrackId)
+        if (!toTrack) return false
+
+        // Remove from old track
+        fromTrack.clips.splice(clipIndex, 1)
+        this.updateTrackBufferFromClips(fromTrackId)
+
+        // Add to new track
+        clip.startTime = Math.max(0, newStartTime)
+        clip.color = toTrack.color
+        toTrack.clips.push(clip)
+        this.updateTrackBufferFromClips(toTrackId)
+      } else {
+        // Just moving position within same track
+        clip.startTime = Math.max(0, newStartTime)
+        this.updateTrackBufferFromClips(fromTrackId)
+      }
+
+      this.updateDuration()
+      return true
+    },
+
+    /**
+     * Remove clip from track
+     */
+    removeClip(trackId, clipId) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track) return false
+
+      const index = track.clips.findIndex(c => c.id === clipId)
+      if (index === -1) return false
+
+      track.clips.splice(index, 1)
+      this.updateTrackBufferFromClips(trackId)
+      this.updateDuration()
+
+      return true
+    },
+
+    /**
+     * Update track buffer from all clips (mix them together)
+     */
+    updateTrackBufferFromClips(trackId) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track) return
+
+      // If no clips, clear track
+      if (track.clips.length === 0) {
+        track.buffer = null
+        track.duration = 0
+        track.waveformData = null
+        this.engine.setTrackBuffer(trackId, null)
+        return
+      }
+
+      // Calculate total duration needed
+      const maxEndTime = Math.max(...track.clips.map(c => c.startTime + c.duration))
+      const sampleRate = track.clips[0].buffer.sampleRate
+      const totalSamples = Math.ceil(maxEndTime * sampleRate)
+
+      // Create mixed buffer
+      const numChannels = Math.max(...track.clips.map(c => c.buffer.numberOfChannels))
+      const mixedBuffer = this.engine.audioContext.createBuffer(
+        numChannels,
+        totalSamples,
+        sampleRate
+      )
+
+      // Initialize with silence
+      for (let ch = 0; ch < numChannels; ch++) {
+        const channelData = mixedBuffer.getChannelData(ch)
+        channelData.fill(0)
+      }
+
+      // Mix in each clip
+      for (const clip of track.clips) {
+        const startSample = Math.floor(clip.startTime * sampleRate)
+
+        for (let ch = 0; ch < numChannels; ch++) {
+          const mixedData = mixedBuffer.getChannelData(ch)
+          const clipChannelIndex = Math.min(ch, clip.buffer.numberOfChannels - 1)
+          const clipData = clip.buffer.getChannelData(clipChannelIndex)
+
+          for (let i = 0; i < clipData.length; i++) {
+            const destIndex = startSample + i
+            if (destIndex < totalSamples) {
+              // Mix audio (simple addition with clamping)
+              mixedData[destIndex] = Math.max(-1, Math.min(1, mixedData[destIndex] + clipData[i]))
+            }
+          }
+        }
+      }
+
+      // Update track
+      track.buffer = mixedBuffer
+      track.duration = maxEndTime
+      track.waveformData = this.generateWaveformData(mixedBuffer)
+      this.engine.setTrackBuffer(trackId, mixedBuffer)
+    },
+
+    /**
+     * Get clips that overlap at a given time
+     */
+    getOverlappingClips(trackId, time) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track) return []
+
+      return track.clips.filter(clip => {
+        return time >= clip.startTime && time < clip.startTime + clip.duration
+      })
     },
 
     /**
