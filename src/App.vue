@@ -18,6 +18,7 @@
       @toggle-effects="showEffects = !showEffects"
       @toggle-generator="showGenerator = !showGenerator"
       @toggle-snippets="showSnippets = !showSnippets"
+      @toggle-settings="showSettings = !showSettings"
     />
 
     <!-- Timeline -->
@@ -71,6 +72,9 @@
     <!-- Snippet Panel -->
     <SnippetPanel :visible="showSnippets" @close="showSnippets = false" />
 
+    <!-- Settings Panel -->
+    <SettingsPanel :visible="showSettings" @close="showSettings = false" />
+
     <!-- Footer -->
     <footer class="bg-gray-900 border-t border-gray-700 px-6 py-2 text-xs text-gray-500">
       <div class="flex items-center justify-between">
@@ -114,6 +118,7 @@ import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
 import GeneratorPanel from './components/GeneratorPanel.vue'
 import SnippetPanel from './components/SnippetPanel.vue'
+import SettingsPanel from './components/SettingsPanel.vue'
 
 const audioStore = useAudioStore()
 const historyStore = useHistoryStore()
@@ -122,6 +127,7 @@ const { tracks, selectedTrack } = storeToRefs(audioStore)
 const showEffects = ref(false)
 const showGenerator = ref(false)
 const showSnippets = ref(false)
+const showSettings = ref(false)
 const fileInput = ref(null)
 
 onMounted(async () => {

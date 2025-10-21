@@ -41,7 +41,10 @@
     </div>
 
     <!-- Waveform Display -->
-    <div class="relative bg-gray-900 h-32">
+    <div
+      class="relative bg-gray-900 h-32"
+      :class="{ 'ring-2 ring-blue-500': isDraggingOver }"
+    >
       <canvas
         ref="waveformCanvas"
         class="waveform-canvas w-full h-full"
@@ -50,6 +53,7 @@
         @mouseup="endSelection"
         @mouseleave="endSelection"
         @dragover.prevent="handleDragOver"
+        @dragleave="handleDragLeave"
         @drop.prevent="handleDrop"
       ></canvas>
 
@@ -59,6 +63,17 @@
         class="absolute top-0 bottom-0 bg-white bg-opacity-20 pointer-events-none border-l-2 border-r-2 border-white"
         :style="selectionStyle"
       ></div>
+
+      <!-- Drop indicator -->
+      <div
+        v-if="isDraggingOver"
+        class="absolute top-0 bottom-0 bg-blue-500 bg-opacity-30 pointer-events-none"
+      ></div>
+    </div>
+
+    <!-- Time Markers -->
+    <div class="relative h-5 bg-gray-950">
+      <canvas ref="timeMarkerCanvas" class="w-full h-full"></canvas>
     </div>
 
     <!-- Track Controls Bottom -->
@@ -116,9 +131,11 @@ const props = defineProps({
 
 const audioStore = useAudioStore()
 const waveformCanvas = ref(null)
+const timeMarkerCanvas = ref(null)
 const volume = ref(props.track.volume)
 const pan = ref(props.track.pan)
 const isSelecting = ref(false)
+const isDraggingOver = ref(false)
 
 const selectionStyle = computed(() => {
   if (!audioStore.selection || audioStore.selection.trackId !== props.track.id) return {}
@@ -142,12 +159,21 @@ const selectionStyle = computed(() => {
 
 onMounted(() => {
   drawWaveform()
+  drawTimeMarkers()
   // Redraw on window resize
-  window.addEventListener('resize', drawWaveform)
+  window.addEventListener('resize', () => {
+    drawWaveform()
+    drawTimeMarkers()
+  })
 })
 
 watch(() => props.track.waveformData, () => {
   drawWaveform()
+  drawTimeMarkers()
+})
+
+watch(() => props.track.duration, () => {
+  drawTimeMarkers()
 })
 
 function drawWaveform() {
@@ -201,6 +227,52 @@ function drawWaveform() {
   ctx.moveTo(0, middle)
   ctx.lineTo(rect.width, middle)
   ctx.stroke()
+}
+
+function drawTimeMarkers() {
+  const canvas = timeMarkerCanvas.value
+  if (!canvas || !props.track.duration) return
+
+  const ctx = canvas.getContext('2d')
+  const dpr = window.devicePixelRatio || 1
+  const rect = canvas.getBoundingClientRect()
+
+  canvas.width = rect.width * dpr
+  canvas.height = rect.height * dpr
+
+  ctx.scale(dpr, dpr)
+
+  // Clear canvas
+  ctx.fillStyle = '#030712' // gray-950
+  ctx.fillRect(0, 0, rect.width, rect.height)
+
+  const duration = props.track.duration
+  const snapInterval = audioStore.timelineSnapInterval || 1
+  const pixelsPerSecond = rect.width / duration
+
+  ctx.strokeStyle = '#374151' // gray-700
+  ctx.fillStyle = '#6b7280' // gray-500
+  ctx.font = '9px monospace'
+  ctx.textAlign = 'center'
+
+  // Draw time markers based on snap interval
+  for (let time = 0; time <= duration; time += snapInterval) {
+    const x = time * pixelsPerSecond
+
+    // Draw tick
+    ctx.beginPath()
+    ctx.moveTo(x, 0)
+    ctx.lineTo(x, rect.height)
+    ctx.stroke()
+
+    // Draw time label
+    if (time % (snapInterval * 5) === 0 || snapInterval >= 5) {
+      const mins = Math.floor(time / 60)
+      const secs = Math.floor(time % 60)
+      const label = mins > 0 ? `${mins}:${secs.toString().padStart(2, '0')}` : `${secs}s`
+      ctx.fillText(label, x, rect.height - 2)
+    }
+  }
 }
 
 function selectTrack() {
@@ -279,21 +351,34 @@ function endSelection() {
 
 function handleDragOver(e) {
   e.dataTransfer.dropEffect = 'copy'
+  isDraggingOver.value = true
+}
+
+function handleDragLeave(e) {
+  isDraggingOver.value = false
 }
 
 function handleDrop(e) {
+  isDraggingOver.value = false
   const snippetId = e.dataTransfer.getData('application/snippet-id')
-  if (!snippetId) return
+  if (!snippetId) {
+    console.log('No snippet ID in drop event')
+    return
+  }
 
   // Calculate position from drop location
   const rect = waveformCanvas.value.getBoundingClientRect()
   const x = e.clientX - rect.left
-  const duration = props.track.duration || 0
+  const duration = props.track.duration || 1 // Use 1 second as default for empty tracks
   const position = (x / rect.width) * duration
 
   // Place snippet at position
-  audioStore.placeSnippet(snippetId, props.track.id, position)
-  console.log(`Placed snippet at ${position.toFixed(2)}s in track ${props.track.name}`)
+  const success = audioStore.placeSnippet(snippetId, props.track.id, position)
+  if (success) {
+    console.log(`✓ Placed snippet at ${position.toFixed(2)}s in track ${props.track.name}`)
+  } else {
+    console.error('Failed to place snippet')
+  }
 }
 
 function formatDuration(seconds) {

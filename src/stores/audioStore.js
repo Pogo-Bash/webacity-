@@ -29,7 +29,8 @@ export const useAudioStore = defineStore('audio', {
     projectName: 'Untitled Project',
     sampleRate: 44100,
     isInitialized: false,
-    viewMode: 'waveform' // 'waveform' or 'spectrogram'
+    viewMode: 'waveform', // 'waveform' or 'spectrogram'
+    timelineSnapInterval: 1 // Timeline snap/grid interval in seconds (1-30)
   }),
 
   getters: {
@@ -778,10 +779,27 @@ export const useAudioStore = defineStore('audio', {
      */
     placeSnippet(snippetId, trackId, position = 0) {
       const snippet = this.snippets.find(s => s.id === snippetId)
-      if (!snippet) return false
+      if (!snippet) {
+        console.error('Snippet not found:', snippetId)
+        return false
+      }
 
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return false
+      if (!track) {
+        console.error('Track not found:', trackId)
+        return false
+      }
+
+      // If track is empty, just place the snippet directly
+      if (!track.buffer) {
+        track.buffer = snippet.buffer
+        track.duration = snippet.buffer.duration
+        track.waveformData = this.generateWaveformData(snippet.buffer)
+        this.engine.setTrackBuffer(trackId, snippet.buffer)
+        this.updateDuration()
+        console.log('Placed snippet in empty track')
+        return true
+      }
 
       const sampleRate = track.buffer.sampleRate
       const positionSample = Math.floor(position * sampleRate)
@@ -829,6 +847,7 @@ export const useAudioStore = defineStore('audio', {
       this.engine.setTrackBuffer(trackId, newBuffer)
       this.updateDuration()
 
+      console.log('Placed snippet at position', position)
       return true
     },
 

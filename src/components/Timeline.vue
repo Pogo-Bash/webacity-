@@ -1,12 +1,20 @@
 <template>
   <div class="timeline-container bg-gray-800 border-b border-gray-700">
     <!-- Ruler -->
-    <div class="relative h-8 bg-gray-900" ref="ruler" @click="seek">
+    <div
+      class="relative h-8 bg-gray-900 cursor-pointer"
+      ref="ruler"
+      @mousedown="startDrag"
+      @mousemove="drag"
+      @mouseup="endDrag"
+      @mouseleave="endDrag"
+    >
       <canvas ref="rulerCanvas" class="w-full h-full"></canvas>
 
       <!-- Playhead -->
       <div
-        class="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none"
+        class="absolute top-0 bottom-0 w-0.5 bg-red-500"
+        :class="{ 'cursor-grab': !isDragging, 'cursor-grabbing': isDragging }"
         :style="{ left: playheadPosition + 'px' }"
       >
         <div class="w-3 h-3 bg-red-500 transform -translate-x-1/2 relative top-0" style="clip-path: polygon(50% 0%, 0% 100%, 100% 100%)"></div>
@@ -38,6 +46,7 @@ const { currentTime, duration, sampleRate } = storeToRefs(audioStore)
 
 const ruler = ref(null)
 const rulerCanvas = ref(null)
+const isDragging = ref(false)
 
 const playheadPosition = computed(() => {
   if (!ruler.value || duration.value === 0) return 0
@@ -123,11 +132,26 @@ function getTimeInterval(totalSeconds) {
   return 60
 }
 
-function seek(e) {
+function startDrag(e) {
+  if (!ruler.value || duration.value === 0) return
+  isDragging.value = true
+  seekToMouse(e)
+}
+
+function drag(e) {
+  if (!isDragging.value) return
+  seekToMouse(e)
+}
+
+function endDrag() {
+  isDragging.value = false
+}
+
+function seekToMouse(e) {
   if (!ruler.value || duration.value === 0) return
 
   const rect = ruler.value.getBoundingClientRect()
-  const x = e.clientX - rect.left
+  const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
   const ratio = x / rect.width
   const time = ratio * duration.value
 
