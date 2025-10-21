@@ -9,28 +9,27 @@
       </button>
     </div>
 
-    <!-- Model Status -->
+    <!-- TensorFlow.js Status -->
     <div class="p-4 border-b border-gray-700">
       <div class="flex items-center gap-2 mb-2">
-        <div :class="['w-2 h-2 rounded-full', modelStatus.loaded ? 'bg-green-500' : 'bg-yellow-500']"></div>
+        <div :class="['w-2 h-2 rounded-full', tfStatus.initialized ? 'bg-green-500' : 'bg-gray-500']"></div>
         <span class="text-sm text-gray-300">
-          {{ modelStatus.loaded ? 'Model Ready' : 'Model Not Loaded' }}
+          {{ tfStatus.initialized ? tfStatus.mode : 'Not Initialized' }}
         </span>
       </div>
 
-      <div v-if="!modelStatus.exists" class="text-xs text-yellow-400 bg-yellow-900 bg-opacity-20 p-2 rounded">
-        ⚠️ No model file found. Please add an ONNX model to <code>public/models/</code>
-        <a href="/models/README.md" target="_blank" class="text-blue-400 hover:underline ml-1">Read instructions</a>
+      <div class="text-xs bg-blue-900 bg-opacity-20 p-2 rounded border border-blue-700">
+        <div class="flex items-start gap-2">
+          <svg class="w-4 h-4 mt-0.5 flex-shrink-0 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+          </svg>
+          <div>
+            <strong>Demo Mode:</strong> Using frequency-based audio filters.
+            For AI-based separation, add a TensorFlow.js model.
+            <a href="/models/README.md" target="_blank" class="text-blue-400 hover:underline ml-1">Learn more</a>
+          </div>
+        </div>
       </div>
-
-      <button
-        v-if="!modelStatus.loaded && modelStatus.exists"
-        @click="loadModel"
-        :disabled="loading"
-        class="mt-2 w-full px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded transition-colors disabled:opacity-50"
-      >
-        {{ loading ? 'Loading Model...' : 'Load AI Model' }}
-      </button>
     </div>
 
     <!-- Track Selection -->
@@ -74,8 +73,9 @@
               <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
             </svg>
             <div>
-              <strong>Processing time:</strong> Approximately 30-60 seconds for a 3-minute song.
-              Larger files will take longer. Browser-based AI is slower than server-side processing.
+              <strong>Demo Mode:</strong> Uses frequency-based filters for fast separation (1-2 seconds).
+              Results are approximate - vocals emphasize mid-range frequencies, instrumental emphasizes bass/treble.
+              For professional-quality separation, use an AI model.
             </div>
           </div>
         </div>
@@ -157,12 +157,13 @@ defineEmits(['close'])
 const audioStore = useAudioStore()
 const { selectedTrack } = storeToRefs(audioStore)
 
-const modelStatus = ref({
-  loaded: false,
-  exists: false
+const tfStatus = ref({
+  initialized: false,
+  backend: '',
+  mode: '',
+  tfVersion: ''
 })
 
-const loading = ref(false)
 const processing = ref(false)
 const progressInfo = ref({
   status: '',
@@ -173,31 +174,20 @@ const progressInfo = ref({
 const stems = ref(null)
 
 const canSeparate = computed(() => {
-  return modelStatus.value.loaded &&
-         selectedTrack.value &&
+  return selectedTrack.value &&
          selectedTrack.value.clips.length > 0 &&
          !processing.value
 })
 
 onMounted(async () => {
-  // Check if model exists
-  modelStatus.value.exists = await stemSeparator.checkModelExists()
-})
-
-async function loadModel() {
-  loading.value = true
+  // Initialize TensorFlow.js
   try {
-    await stemSeparator.initialize((progress) => {
-      console.log('Model loading:', progress)
-    })
-    modelStatus.value.loaded = true
+    await stemSeparator.initialize()
+    tfStatus.value = stemSeparator.getStatus()
   } catch (error) {
-    console.error('Failed to load model:', error)
-    alert('Failed to load AI model: ' + error.message)
-  } finally {
-    loading.value = false
+    console.error('Failed to initialize stem separator:', error)
   }
-}
+})
 
 async function startSeparation() {
   if (!selectedTrack.value) return
