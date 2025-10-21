@@ -1,23 +1,34 @@
 import { defineStore } from 'pinia'
 import AudioEngine from '../audio/AudioEngine'
 import WasmBridge from '../audio/WasmBridge'
+import AudioRecorder from '../audio/AudioRecorder'
+import AudioGenerators from '../audio/AudioGenerators'
+import AdvancedEffects from '../audio/AdvancedEffects'
+import AudioAnalyzer from '../audio/AudioAnalyzer'
 
 export const useAudioStore = defineStore('audio', {
   state: () => ({
     engine: null,
     wasmBridge: null,
+    recorder: null,
+    generators: null,
+    advancedEffects: null,
+    analyzer: null,
     tracks: [],
     selectedTrackId: null,
     selection: null, // { trackId, startTime, endTime }
     clipboard: null, // { buffer, duration }
     isPlaying: false,
+    isRecording: false,
+    recordingLevel: 0,
     currentTime: 0,
     duration: 0,
     zoom: 1,
     masterVolume: 1,
     projectName: 'Untitled Project',
     sampleRate: 44100,
-    isInitialized: false
+    isInitialized: false,
+    viewMode: 'waveform' // 'waveform' or 'spectrogram'
   }),
 
   getters: {
@@ -59,9 +70,16 @@ export const useAudioStore = defineStore('audio', {
         await this.wasmBridge.load()
 
         this.sampleRate = this.engine.sampleRate
+
+        // Initialize new modules
+        this.recorder = new AudioRecorder(this.engine.audioContext)
+        this.generators = new AudioGenerators(this.engine.audioContext, this.sampleRate)
+        this.advancedEffects = new AdvancedEffects(this.sampleRate)
+        this.analyzer = new AudioAnalyzer(this.engine.audioContext, this.sampleRate)
+
         this.isInitialized = true
 
-        console.log('Audio store initialized')
+        console.log('Audio store initialized with all modules')
       } catch (error) {
         console.error('Failed to initialize audio store:', error)
         throw error
@@ -516,10 +534,187 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Start recording from microphone
+     */
+    async startRecording() {
+      await this.init()
+      try {
+        await this.recorder.startRecording()
+        this.isRecording = true
+
+        // Monitor recording level
+        this.recorder.setupLevelMonitoring((level) => {
+          this.recordingLevel = level
+        })
+
+        console.log('Recording started')
+      } catch (error) {
+        console.error('Failed to start recording:', error)
+        throw error
+      }
+    },
+
+    /**
+     * Stop recording and create track
+     */
+    async stopRecording() {
+      if (!this.isRecording) return null
+
+      try {
+        const audioBuffer = await this.recorder.stopRecording()
+        this.isRecording = false
+        this.recordingLevel = 0
+
+        // Create new track with recorded audio
+        const track = this.addTrack('Recording')
+        track.buffer = audioBuffer
+        track.duration = audioBuffer.duration
+        this.engine.setTrackBuffer(track.id, audioBuffer)
+        track.waveformData = this.generateWaveformData(audioBuffer)
+        this.updateDuration()
+
+        console.log('Recording stopped, track created')
+        return track.id
+      } catch (error) {
+        console.error('Failed to stop recording:', error)
+        throw error
+      }
+    },
+
+    /**
+     * Generate tone and add as track
+     */
+    generateTone(frequency, duration, waveform = 'sine', amplitude = 0.5) {
+      let buffer
+
+      switch (waveform) {
+        case 'sine':
+          buffer = this.generators.generateTone(frequency, duration, amplitude)
+          break
+        case 'square':
+          buffer = this.generators.generateSquareWave(frequency, duration, amplitude)
+          break
+        case 'sawtooth':
+          buffer = this.generators.generateSawtoothWave(frequency, duration, amplitude)
+          break
+        default:
+          buffer = this.generators.generateTone(frequency, duration, amplitude)
+      }
+
+      const track = this.addTrack(`${waveform} ${frequency}Hz`)
+      track.buffer = buffer
+      track.duration = duration
+      this.engine.setTrackBuffer(track.id, buffer)
+      track.waveformData = this.generateWaveformData(buffer)
+      this.updateDuration()
+
+      return track.id
+    },
+
+    /**
+     * Generate noise and add as track
+     */
+    generateNoise(duration, noiseType = 'white', amplitude = 0.3) {
+      let buffer
+
+      switch (noiseType) {
+        case 'white':
+          buffer = this.generators.generateWhiteNoise(duration, amplitude)
+          break
+        case 'pink':
+          buffer = this.generators.generatePinkNoise(duration, amplitude)
+          break
+        case 'brown':
+          buffer = this.generators.generateBrownNoise(duration, amplitude)
+          break
+        default:
+          buffer = this.generators.generateWhiteNoise(duration, amplitude)
+      }
+
+      const track = this.addTrack(`${noiseType} noise`)
+      track.buffer = buffer
+      track.duration = duration
+      this.engine.setTrackBuffer(track.id, buffer)
+      track.waveformData = this.generateWaveformData(buffer)
+      this.updateDuration()
+
+      return track.id
+    },
+
+    /**
+     * Generate silence and add as track
+     */
+    generateSilence(duration) {
+      const buffer = this.generators.generateSilence(duration)
+
+      const track = this.addTrack('Silence')
+      track.buffer = buffer
+      track.duration = duration
+      this.engine.setTrackBuffer(track.id, buffer)
+      track.waveformData = this.generateWaveformData(buffer)
+      this.updateDuration()
+
+      return track.id
+    },
+
+    /**
+     * Generate chirp and add as track
+     */
+    generateChirp(startFreq, endFreq, duration, amplitude = 0.5) {
+      const buffer = this.generators.generateChirp(startFreq, endFreq, duration, amplitude)
+
+      const track = this.addTrack(`Chirp ${startFreq}-${endFreq}Hz`)
+      track.buffer = buffer
+      track.duration = duration
+      this.engine.setTrackBuffer(track.id, buffer)
+      track.waveformData = this.generateWaveformData(buffer)
+      this.updateDuration()
+
+      return track.id
+    },
+
+    /**
+     * Analyze track - get beats, tempo, spectrum
+     */
+    analyzeTrack(trackId) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track || !track.buffer) return null
+
+      const tempo = this.analyzer.estimateTempo(track.buffer)
+      const peaks = this.analyzer.findPeaks(track.buffer)
+      const rms = this.analyzer.calculateRMS(track.buffer)
+      const peak = this.analyzer.calculatePeak(track.buffer)
+      const silenceRegions = this.analyzer.detectSilence(track.buffer)
+
+      return {
+        tempo,
+        peaks,
+        rms,
+        peak,
+        silenceRegions,
+        duration: track.duration
+      }
+    },
+
+    /**
+     * Generate spectrogram for track
+     */
+    generateSpectrogram(trackId) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track || !track.buffer) return null
+
+      return this.analyzer.generateSpectrogram(track.buffer)
+    },
+
+    /**
      * Reset project
      */
     reset() {
       this.stop()
+      if (this.isRecording) {
+        this.recorder.destroy()
+        this.isRecording = false
+      }
       this.tracks = []
       this.selectedTrackId = null
       this.selection = null
