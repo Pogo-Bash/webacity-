@@ -8,18 +8,14 @@
       @toggle-generator="showGenerator = !showGenerator"
       @toggle-snippets="showSnippets = !showSnippets"
       @toggle-stem-separation="showStemSeparation = !showStemSeparation"
+      @toggle-settings="showSettings = !showSettings"
       @play-pause="handlePlayPause"
       @stop="audioStore.stop()"
       @record="handleRecord"
     />
 
     <!-- Toolbar with Playback Controls -->
-    <Toolbar
-      @toggle-effects="showEffects = !showEffects"
-      @toggle-generator="showGenerator = !showGenerator"
-      @toggle-stem-separation="showStemSeparation = !showStemSeparation"
-      @toggle-settings="showSettings = !showSettings"
-    />
+    <Toolbar />
 
     <!-- Timeline -->
     <Timeline ref="timeline" />

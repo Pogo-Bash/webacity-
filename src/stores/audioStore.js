@@ -359,6 +359,32 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Export entire project (mix all tracks) as WAV
+     */
+    exportProject() {
+      if (!this.hasAudio) return null
+
+      // Export the mix of all tracks
+      const blob = this.engine.exportMix()
+      if (!blob) return null
+
+      const filename = `${this.projectName || 'project'}.wav`
+
+      // Create download link
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+
+      console.log(`✅ Exported project: ${filename}`)
+      return true
+    },
+
+    /**
      * Update total duration
      */
     updateDuration() {

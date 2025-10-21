@@ -89,47 +89,6 @@
           </svg>
         </button>
 
-        <button
-          @click="removeGaps"
-          class="toolbar-button"
-          :disabled="!hasAudio"
-          title="Remove Gaps Between Clips"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-          </svg>
-        </button>
-
-        <button
-          @click="emit('toggle-effects')"
-          class="toolbar-button"
-          title="Effects"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3" />
-          </svg>
-        </button>
-
-        <button
-          @click="emit('toggle-generator')"
-          class="toolbar-button"
-          title="Generate Audio"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-          </svg>
-        </button>
-
-        <button
-          @click="emit('toggle-stem-separation')"
-          class="toolbar-button bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-700 hover:to-blue-700"
-          title="AI Stem Separation"
-        >
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" />
-          </svg>
-        </button>
-
         <!-- Master Volume -->
         <div class="flex items-center gap-2 ml-4">
           <svg class="w-4 h-4 text-gray-400" fill="currentColor" viewBox="0 0 24 24">
@@ -146,17 +105,6 @@
           />
           <span class="text-xs text-gray-400 w-8">{{ Math.round(masterVolume * 100) }}%</span>
         </div>
-
-        <!-- Settings Button -->
-        <button
-          @click="emit('toggle-settings')"
-          class="toolbar-button ml-2"
-          title="Settings"
-        >
-          <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.7-1.62-0.94L14.4,2.81c-0.04-0.24-0.24-0.41-0.48-0.41 h-3.84c-0.24,0-0.43,0.17-0.47,0.41L9.25,5.35C8.66,5.59,8.12,5.92,7.63,6.29L5.24,5.33c-0.22-0.08-0.47,0-0.59,0.22L2.74,8.87 C2.62,9.08,2.66,9.34,2.86,9.48l2.03,1.58C4.84,11.36,4.8,11.69,4.8,12s0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.7,1.62,0.94l0.36,2.54 c0.05,0.24,0.24,0.41,0.48,0.41h3.84c0.24,0,0.44-0.17,0.47-0.41l0.36-2.54c0.59-0.24,1.13-0.56,1.62-0.94l2.39,0.96 c0.22,0.08,0.47,0,0.59-0.22l1.92-3.32c0.12-0.22,0.07-0.47-0.12-0.61L19.14,12.94z M12,15.6c-1.98,0-3.6-1.62-3.6-3.6 s1.62-3.6,3.6-3.6s3.6,1.62,3.6,3.6S13.98,15.6,12,15.6z"/>
-          </svg>
-        </button>
       </div>
     </div>
   </div>
@@ -176,8 +124,6 @@
 import { ref, computed } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
 import { storeToRefs } from 'pinia'
-
-const emit = defineEmits(['toggle-effects', 'toggle-generator', 'toggle-stem-separation', 'toggle-settings'])
 
 const audioStore = useAudioStore()
 const { isPlaying, projectName, hasAudio } = storeToRefs(audioStore)
@@ -259,15 +205,6 @@ function exportAudio() {
 
 function addTrack() {
   audioStore.addTrack()
-}
-
-function removeGaps() {
-  const count = audioStore.removeGaps()
-  if (count > 0) {
-    console.log(`✅ Removed gaps: ${count} clips repositioned`)
-  } else {
-    console.log('ℹ️ No gaps to remove')
-  }
 }
 
 function updateMasterVolume() {
