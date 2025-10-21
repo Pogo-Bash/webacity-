@@ -174,6 +174,21 @@ npm run build
 
 The built files will be in the `dist/` directory.
 
+### Deployment
+
+Deploy to production platforms like Render, Vercel, Netlify, or Railway:
+
+```bash
+npm run build  # Build the app
+npm start      # Start production server
+```
+
+The app is configured to work with `0.0.0.0` host and respects the `PORT` environment variable for easy deployment.
+
+**Quick Deploy to Render:**
+- The included `render.yaml` enables one-click deployment
+- See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed deployment instructions
+
 ### Code Structure
 
 - **AudioEngine**: Manages Web Audio API context, tracks, and playback
