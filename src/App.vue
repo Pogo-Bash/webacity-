@@ -14,7 +14,10 @@
     </header>
 
     <!-- Toolbar -->
-    <Toolbar @toggle-effects="showEffects = !showEffects" />
+    <Toolbar
+      @toggle-effects="showEffects = !showEffects"
+      @toggle-generator="showGenerator = !showGenerator"
+    />
 
     <!-- Timeline -->
     <Timeline />
@@ -61,6 +64,9 @@
     <!-- Effects Panel -->
     <EffectPanel :visible="showEffects" @close="showEffects = false" />
 
+    <!-- Generator Panel -->
+    <GeneratorPanel :visible="showGenerator" @close="showGenerator = false" />
+
     <!-- Footer -->
     <footer class="bg-gray-900 border-t border-gray-700 px-6 py-2 text-xs text-gray-500">
       <div class="flex items-center justify-between">
@@ -74,8 +80,8 @@
           <span>Space: Play/Pause</span>
           <span>Ctrl+Z/Y: Undo/Redo</span>
           <span>Ctrl+X/C/V: Cut/Copy/Paste</span>
-          <span>Ctrl+A: Select All</span>
-          <span>Del: Delete Selection</span>
+          <span>Ctrl+E/G: Effects/Generate</span>
+          <span>Del: Delete</span>
         </div>
       </div>
     </footer>
@@ -102,12 +108,14 @@ import Toolbar from './components/Toolbar.vue'
 import Timeline from './components/Timeline.vue'
 import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
+import GeneratorPanel from './components/GeneratorPanel.vue'
 
 const audioStore = useAudioStore()
 const historyStore = useHistoryStore()
 const { tracks, selectedTrack } = storeToRefs(audioStore)
 
 const showEffects = ref(false)
+const showGenerator = ref(false)
 const fileInput = ref(null)
 
 onMounted(async () => {
@@ -231,6 +239,12 @@ function handleKeyDown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
     e.preventDefault()
     showEffects.value = !showEffects.value
+  }
+
+  // Ctrl/Cmd + G: Toggle Generator
+  if ((e.ctrlKey || e.metaKey) && e.key === 'g') {
+    e.preventDefault()
+    showGenerator.value = !showGenerator.value
   }
 }
 

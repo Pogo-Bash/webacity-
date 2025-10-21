@@ -27,15 +27,24 @@
         </button>
 
         <button
-          @click="record"
-          :class="['toolbar-button', isRecording ? 'bg-red-600 animate-pulse' : '']"
-          title="Record"
-          disabled
+          @click="toggleRecord"
+          :class="['toolbar-button', audioStore.isRecording ? 'bg-red-600 animate-pulse' : '']"
+          title="Record from Microphone"
         >
           <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="8" />
           </svg>
         </button>
+
+        <!-- Recording Level Meter -->
+        <div v-if="audioStore.isRecording" class="flex items-center gap-2 px-2">
+          <div class="w-24 h-2 bg-gray-700 rounded-full overflow-hidden">
+            <div
+              class="h-full bg-red-500 transition-all duration-75"
+              :style="{ width: (audioStore.recordingLevel * 100) + '%' }"
+            ></div>
+          </div>
+        </div>
       </div>
 
       <!-- Center: Project Name -->
@@ -90,6 +99,16 @@
           </svg>
         </button>
 
+        <button
+          @click="emit('toggle-generator')"
+          class="toolbar-button"
+          title="Generate Audio"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </button>
+
         <!-- Master Volume -->
         <div class="flex items-center gap-2 ml-4">
           <svg class="w-4 h-4 text-gray-400" fill="currentColor" viewBox="0 0 24 24">
@@ -126,13 +145,12 @@ import { ref, computed } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
 import { storeToRefs } from 'pinia'
 
-const emit = defineEmits(['toggle-effects'])
+const emit = defineEmits(['toggle-effects', 'toggle-generator'])
 
 const audioStore = useAudioStore()
 const { isPlaying, projectName, hasAudio } = storeToRefs(audioStore)
 
 const fileInput = ref(null)
-const isRecording = ref(false)
 const masterVolume = ref(1)
 
 function playPause() {
@@ -147,9 +165,17 @@ function stop() {
   audioStore.stop()
 }
 
-function record() {
-  // Recording functionality to be implemented
-  console.log('Recording not yet implemented')
+async function toggleRecord() {
+  if (audioStore.isRecording) {
+    await audioStore.stopRecording()
+  } else {
+    try {
+      await audioStore.startRecording()
+    } catch (error) {
+      console.error('Failed to start recording:', error)
+      alert('Microphone access denied. Please grant permission to record.')
+    }
+  }
 }
 
 function importAudio() {
