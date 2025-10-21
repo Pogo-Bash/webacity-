@@ -5,6 +5,7 @@ import AudioRecorder from '../audio/AudioRecorder'
 import AudioGenerators from '../audio/AudioGenerators'
 import AdvancedEffects from '../audio/AdvancedEffects'
 import AudioAnalyzer from '../audio/AudioAnalyzer'
+import { useHistoryStore } from './historyStore'
 
 export const useAudioStore = defineStore('audio', {
   state: () => ({
@@ -96,6 +97,54 @@ export const useAudioStore = defineStore('audio', {
         console.error('Failed to initialize audio store:', error)
         throw error
       }
+    },
+
+    /**
+     * Create a new project (reset everything)
+     */
+    newProject() {
+      // Confirm if there are tracks
+      if (this.tracks.length > 0) {
+        const confirmed = confirm('Create new project? All unsaved changes will be lost.')
+        if (!confirmed) return false
+      }
+
+      // Stop playback
+      if (this.isPlaying) {
+        this.stop()
+      }
+
+      // Stop recording
+      if (this.isRecording) {
+        this.recorder.stop()
+        this.isRecording = false
+      }
+
+      // Clear all tracks
+      this.tracks.forEach(track => {
+        if (this.engine) {
+          this.engine.removeTrack(track.id)
+        }
+      })
+
+      // Reset state
+      this.tracks = []
+      this.selectedTrackId = null
+      this.selectedClipId = null
+      this.selection = null
+      this.clipboard = null
+      this.currentTime = 0
+      this.duration = 0
+      this.zoom = 1
+      this.masterVolume = 1
+      this.projectName = 'Untitled Project'
+
+      // Clear history
+      const historyStore = useHistoryStore()
+      historyStore.clear()
+
+      console.log('✅ New project created')
+      return true
     },
 
     /**

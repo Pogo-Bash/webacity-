@@ -1,24 +1,16 @@
 <template>
   <div class="app-container h-screen w-screen flex flex-col bg-darker text-gray-100">
-    <!-- Header -->
-    <header class="bg-gray-900 border-b border-gray-700 px-6 py-3">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <h1 class="text-xl font-bold text-white">Webacity</h1>
-          <span class="text-xs text-gray-400 bg-gray-800 px-2 py-1 rounded">Web Audio Editor</span>
-        </div>
-        <div class="text-xs text-gray-500">
-          A modern, web-based audio editor powered by WASM
-        </div>
-      </div>
-    </header>
-
-    <!-- Toolbar -->
-    <Toolbar
+    <!-- Menu Bar (replaces header and toolbar) -->
+    <MenuBar
+      @import="importAudio"
+      @export="exportProject"
       @toggle-effects="showEffects = !showEffects"
       @toggle-generator="showGenerator = !showGenerator"
+      @toggle-snippets="showSnippets = !showSnippets"
       @toggle-stem-separation="showStemSeparation = !showStemSeparation"
-      @toggle-settings="showSettings = !showSettings"
+      @play-pause="handlePlayPause"
+      @stop="audioStore.stop()"
+      @record="handleRecord"
     />
 
     <!-- Timeline -->
@@ -114,12 +106,13 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useAudioStore } from './stores/audioStore'
 import { useHistoryStore } from './stores/historyStore'
 import { DeleteSelectionCommand } from './utils/commands'
 import { storeToRefs } from 'pinia'
-import Toolbar from './components/Toolbar.vue'
+import { AutosaveService } from './services/autosave'
+import MenuBar from './components/MenuBar.vue'
 import Timeline from './components/Timeline.vue'
 import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
@@ -138,7 +131,11 @@ const showEffects = ref(false)
 const showGenerator = ref(false)
 const showStemSeparation = ref(false)
 const showSettings = ref(false)
+const showSnippets = ref(false)
 const fileInput = ref(null)
+
+// Initialize autosave service
+let autosaveService = null
 
 // Calculate playhead position based on timeline ruler
 const mainPlayheadPosition = computed(() => {
@@ -180,13 +177,44 @@ onMounted(async () => {
     console.error('Failed to initialize audio engine:', error)
   }
 
+  // Initialize autosave
+  autosaveService = new AutosaveService(audioStore)
+  autosaveService.start()
+
   // Keyboard shortcuts
   window.addEventListener('keydown', handleKeyDown)
+
+  // Warn before closing if there are unsaved changes
+  window.addEventListener('beforeunload', handleBeforeUnload)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeyDown)
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+
+  // Stop autosave
+  if (autosaveService) {
+    autosaveService.stop()
+  }
 })
+
+// Watch for changes to mark autosave as dirty
+watch([tracks, () => audioStore.masterVolume, () => audioStore.projectName], () => {
+  if (autosaveService) {
+    autosaveService.markChanged()
+  }
+}, { deep: true })
+
+function handleBeforeUnload(e) {
+  if (autosaveService && autosaveService.hasUnsavedChanges) {
+    const message = autosaveService.getUnsavedWarning()
+    if (message) {
+      e.preventDefault()
+      e.returnValue = message
+      return message
+    }
+  }
+}
 
 function handleKeyDown(e) {
   // Ignore if typing in input field
@@ -337,6 +365,31 @@ function sliceAtPlayhead() {
   if (sliceCount === 0) {
     console.log('No tracks selected for slicing or no clips at playhead position')
   }
+}
+
+function handlePlayPause() {
+  if (audioStore.isPlaying) {
+    audioStore.pause()
+  } else {
+    audioStore.play()
+  }
+}
+
+function handleRecord() {
+  if (audioStore.isRecording) {
+    audioStore.stopRecording()
+  } else {
+    audioStore.startRecording()
+  }
+}
+
+function exportProject() {
+  // Export the project as WAV
+  if (!audioStore.hasAudio) {
+    alert('No audio to export')
+    return
+  }
+  audioStore.exportProject()
 }
 </script>
 
