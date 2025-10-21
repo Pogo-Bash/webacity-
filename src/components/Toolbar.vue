@@ -81,7 +81,7 @@
         </button>
 
         <button
-          @click="showEffects = !showEffects"
+          @click="emit('toggle-effects')"
           class="toolbar-button"
           title="Effects"
         >
@@ -133,7 +133,6 @@ const { isPlaying, projectName, hasAudio } = storeToRefs(audioStore)
 
 const fileInput = ref(null)
 const isRecording = ref(false)
-const showEffects = ref(false)
 const masterVolume = ref(1)
 
 function playPause() {
