@@ -134,21 +134,36 @@ const showGenerator = ref(false)
 const showSettings = ref(false)
 const fileInput = ref(null)
 
-// Calculate playhead position for main content area
+// Calculate playhead position based on timeline ruler
 const mainPlayheadPosition = computed(() => {
   // Use refs from storeToRefs for reactivity
   const time = currentTime.value
   const dur = duration.value
 
-  if (!mainContent.value || dur === 0) return 0
+  if (!timeline.value || dur === 0) return 0
 
-  // Get the width of main content (minus padding)
-  const rect = mainContent.value.getBoundingClientRect()
-  const padding = 16 // p-4 = 1rem = 16px
-  const contentWidth = rect.width - (padding * 2)
+  // Get the ruler element from Timeline component
+  const timelineEl = timeline.value.$el
+  if (!timelineEl) return 0
 
+  const rulerEl = timelineEl.querySelector('.relative.h-8')
+  if (!rulerEl) return 0
+
+  // Calculate position the same way as Timeline component
+  const rulerWidth = rulerEl.offsetWidth
   const ratio = time / dur
-  return padding + (ratio * contentWidth)
+  const positionInRuler = ratio * rulerWidth
+
+  // Get the absolute left position of the ruler
+  const rulerRect = rulerEl.getBoundingClientRect()
+  const mainContentRect = mainContent.value?.getBoundingClientRect()
+
+  if (!mainContentRect) return 0
+
+  // Calculate relative position within main content
+  const relativeLeft = rulerRect.left - mainContentRect.left
+
+  return relativeLeft + positionInRuler
 })
 
 onMounted(async () => {

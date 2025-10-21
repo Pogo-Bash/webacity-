@@ -1,5 +1,5 @@
 <template>
-  <div class="timeline-container bg-gray-800 border-b border-gray-700">
+  <div class="timeline-container bg-gray-800 border-b border-gray-700 px-4">
     <!-- Ruler -->
     <div
       class="relative h-8 bg-gray-900 cursor-pointer"
