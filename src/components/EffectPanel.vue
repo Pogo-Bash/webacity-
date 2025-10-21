@@ -196,7 +196,7 @@
 import { ref, computed } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
 import { useHistoryStore } from '../stores/historyStore'
-import { ApplyEffectCommand } from '../utils/commands'
+import { ApplyEffectCommand, ApplyEffectToClipCommand } from '../utils/commands'
 import { storeToRefs } from 'pinia'
 
 defineProps({
@@ -231,13 +231,19 @@ const compRatio = ref(4)
 const compAttack = ref(0.005)
 const compRelease = ref(0.1)
 
-// Helper function to apply effects
+// Helper function to apply effects with undo support
 function applyEffectWithUndo(effectName, params) {
-  // If a clip is selected, apply effect to clip
+  // If a clip is selected, apply effect to clip with undo
   if (audioStore.selectedClipId) {
     try {
-      audioStore.applyEffectToClip(effectName, params)
-      console.log(`${effectName} applied to selected clip`)
+      const command = new ApplyEffectToClipCommand(
+        audioStore,
+        audioStore.selectedClipId,
+        effectName,
+        params
+      )
+      historyStore.execute(command)
+      console.log(`✅ ${effectName} applied to clip (Ctrl+Z to undo)`)
     } catch (error) {
       console.error(`Failed to apply ${effectName} to clip:`, error)
       alert('Failed to apply effect to clip')
@@ -245,7 +251,7 @@ function applyEffectWithUndo(effectName, params) {
     return
   }
 
-  // Otherwise apply to track (old behavior)
+  // Otherwise apply to track (old behavior) with undo
   if (!selectedTrack.value) return
   try {
     const command = new ApplyEffectCommand(
@@ -256,7 +262,7 @@ function applyEffectWithUndo(effectName, params) {
       selection.value
     )
     historyStore.execute(command)
-    console.log(`${effectName} applied` + (selection.value ? ' to selection' : ''))
+    console.log(`✅ ${effectName} applied (Ctrl+Z to undo)`)
   } catch (error) {
     console.error(`Failed to apply ${effectName}:`, error)
     alert('Failed to apply effect')

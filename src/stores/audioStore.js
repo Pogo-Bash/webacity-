@@ -328,6 +328,43 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Remove all gaps between clips
+     * Moves clips so they're all consecutive with no empty space
+     */
+    removeGaps() {
+      let gapsRemoved = 0
+
+      this.tracks.forEach(track => {
+        if (track.clips.length === 0) return
+
+        // Sort clips by start time
+        track.clips.sort((a, b) => a.startTime - b.startTime)
+
+        // Move each clip to start right after the previous one
+        let currentTime = 0
+        track.clips.forEach(clip => {
+          if (clip.startTime !== currentTime) {
+            gapsRemoved++
+          }
+          clip.startTime = currentTime
+          currentTime += clip.duration
+        })
+
+        // Force reactivity
+        track.clips = [...track.clips]
+
+        // Rebuild track buffer from clips
+        this.updateTrackBufferFromClips(track.id)
+      })
+
+      // Update total duration
+      this.updateDuration()
+
+      console.log(`✅ Removed gaps: ${gapsRemoved} clips repositioned`)
+      return gapsRemoved
+    },
+
+    /**
      * Set selection
      */
     setSelection(trackId, startTime, endTime) {

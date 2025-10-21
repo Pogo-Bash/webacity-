@@ -90,6 +90,17 @@
         </button>
 
         <button
+          @click="removeGaps"
+          class="toolbar-button"
+          :disabled="!hasAudio"
+          title="Remove Gaps Between Clips"
+        >
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+          </svg>
+        </button>
+
+        <button
           @click="emit('toggle-effects')"
           class="toolbar-button"
           title="Effects"
@@ -248,6 +259,15 @@ function exportAudio() {
 
 function addTrack() {
   audioStore.addTrack()
+}
+
+function removeGaps() {
+  const count = audioStore.removeGaps()
+  if (count > 0) {
+    console.log(`✅ Removed gaps: ${count} clips repositioned`)
+  } else {
+    console.log('ℹ️ No gaps to remove')
+  }
 }
 
 function updateMasterVolume() {
