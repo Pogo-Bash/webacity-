@@ -4,7 +4,7 @@
       v-if="visible"
       ref="menu"
       class="context-menu fixed bg-gray-800 border border-gray-600 rounded-lg shadow-2xl z-[9999] py-1"
-      :style="{ left: position.x + 'px', top: position.y + 'px' }"
+      :style="menuPosition"
       @contextmenu.prevent
     >
       <!-- Create Snippet -->
@@ -174,6 +174,34 @@ const activeSubmenu = ref(null)
 const hasSelection = computed(() => audioStore.hasSelection)
 const hasTrack = computed(() => props.trackId !== null)
 const canPaste = computed(() => audioStore.clipboard !== null && props.trackId !== null)
+
+const menuPosition = computed(() => {
+  if (!menu.value) return { left: props.position.x + 'px', top: props.position.y + 'px' }
+
+  const menuRect = menu.value.getBoundingClientRect()
+  const viewportWidth = window.innerWidth
+  const viewportHeight = window.innerHeight
+
+  let { x, y } = props.position
+
+  // Adjust horizontal position if menu goes off right edge
+  if (x + menuRect.width > viewportWidth) {
+    x = viewportWidth - menuRect.width - 10
+  }
+
+  // Adjust vertical position if menu goes off bottom edge
+  if (y + menuRect.height > viewportHeight) {
+    y = viewportHeight - menuRect.height - 10
+  }
+
+  // Ensure menu doesn't go off left edge
+  if (x < 10) x = 10
+
+  // Ensure menu doesn't go off top edge
+  if (y < 10) y = 10
+
+  return { left: x + 'px', top: y + 'px' }
+})
 
 onMounted(() => {
   document.addEventListener('click', handleClickOutside)

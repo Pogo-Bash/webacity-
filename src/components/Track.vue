@@ -189,6 +189,12 @@ watch(() => props.track.duration, () => {
   drawTimeMarkers()
 })
 
+watch(() => audioStore.duration, () => {
+  // Redraw when project duration changes (longest track changes)
+  drawWaveform()
+  drawTimeMarkers()
+})
+
 function drawWaveform() {
   const canvas = waveformCanvas.value
   if (!canvas) return
@@ -217,10 +223,16 @@ function drawWaveform() {
     return
   }
 
+  // Scale waveform based on project duration (longest track)
+  const projectDuration = audioStore.duration || props.track.duration || 1
+  const trackDuration = props.track.duration || 0
+  const scaleFactor = trackDuration / projectDuration
+  const waveformWidth = rect.width * scaleFactor
+
   // Draw waveform
   const data = props.track.waveformData
   const middle = rect.height / 2
-  const barWidth = rect.width / data.length
+  const barWidth = waveformWidth / data.length
   const color = props.track.color || '#3b82f6'
 
   ctx.fillStyle = color
@@ -233,13 +245,26 @@ function drawWaveform() {
     ctx.fillRect(x, middle - (max * middle), Math.max(1, barWidth - 0.5), height)
   }
 
-  // Draw center line
+  // Draw center line across scaled waveform
   ctx.strokeStyle = '#374151' // gray-700
   ctx.lineWidth = 1
   ctx.beginPath()
   ctx.moveTo(0, middle)
-  ctx.lineTo(rect.width, middle)
+  ctx.lineTo(waveformWidth, middle)
   ctx.stroke()
+
+  // Draw gray background for remainder
+  if (waveformWidth < rect.width) {
+    ctx.fillStyle = '#0f172a' // darker gray
+    ctx.fillRect(waveformWidth, 0, rect.width - waveformWidth, rect.height)
+
+    // Extend center line to end
+    ctx.strokeStyle = '#1f2937'
+    ctx.beginPath()
+    ctx.moveTo(waveformWidth, middle)
+    ctx.lineTo(rect.width, middle)
+    ctx.stroke()
+  }
 }
 
 function drawTimeMarkers() {
