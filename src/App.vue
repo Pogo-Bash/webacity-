@@ -1,6 +1,6 @@
 <template>
   <div class="app-container h-screen w-screen flex flex-col bg-darker text-gray-100">
-    <!-- Menu Bar (replaces header and toolbar) -->
+    <!-- Menu Bar -->
     <MenuBar
       @import="importAudio"
       @export="exportProject"
@@ -11,6 +11,14 @@
       @play-pause="handlePlayPause"
       @stop="audioStore.stop()"
       @record="handleRecord"
+    />
+
+    <!-- Toolbar with Playback Controls -->
+    <Toolbar
+      @toggle-effects="showEffects = !showEffects"
+      @toggle-generator="showGenerator = !showGenerator"
+      @toggle-stem-separation="showStemSeparation = !showStemSeparation"
+      @toggle-settings="showSettings = !showSettings"
     />
 
     <!-- Timeline -->
@@ -113,6 +121,7 @@ import { DeleteSelectionCommand } from './utils/commands'
 import { storeToRefs } from 'pinia'
 import { AutosaveService } from './services/autosave'
 import MenuBar from './components/MenuBar.vue'
+import Toolbar from './components/Toolbar.vue'
 import Timeline from './components/Timeline.vue'
 import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'

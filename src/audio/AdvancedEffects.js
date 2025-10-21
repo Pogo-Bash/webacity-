@@ -330,6 +330,183 @@ class AdvancedEffects {
 
     return output
   }
+
+  /**
+   * Reverb effect using convolution with impulse response
+   * Simpler version using Schroeder reverb algorithm
+   */
+  reverb(input, roomSize = 0.5, damping = 0.5, wetLevel = 0.3, dryLevel = 0.7) {
+    const output = new Float32Array(input.length)
+
+    // Comb filter delays (in samples) based on room size
+    const combDelays = [1557, 1617, 1491, 1422, 1277, 1356, 1188, 1116].map(d =>
+      Math.floor(d * (0.5 + roomSize * 0.5))
+    )
+
+    // All-pass filter delays
+    const allpassDelays = [225, 556, 441, 341]
+
+    // Initialize delay buffers
+    const combBuffers = combDelays.map(delay => new Float32Array(delay).fill(0))
+    const combIndices = combDelays.map(() => 0)
+    const allpassBuffers = allpassDelays.map(delay => new Float32Array(delay).fill(0))
+    const allpassIndices = allpassDelays.map(() => 0)
+
+    // Feedback for comb filters
+    const combFeedback = 0.84 * (1 - damping * 0.3)
+
+    for (let i = 0; i < input.length; i++) {
+      let sample = input[i]
+      let combOut = 0
+
+      // Parallel comb filters
+      for (let j = 0; j < combBuffers.length; j++) {
+        const delay = combDelays[j]
+        const buffer = combBuffers[j]
+        const index = combIndices[j]
+
+        const delayed = buffer[index]
+        combOut += delayed
+
+        // Write to buffer with feedback and damping
+        buffer[index] = sample + delayed * combFeedback
+        combIndices[j] = (index + 1) % delay
+      }
+
+      combOut /= combBuffers.length
+
+      // Series all-pass filters for diffusion
+      let allpassOut = combOut
+      for (let j = 0; j < allpassBuffers.length; j++) {
+        const delay = allpassDelays[j]
+        const buffer = allpassBuffers[j]
+        const index = allpassIndices[j]
+
+        const delayed = buffer[index]
+        const feedforward = allpassOut * -0.5
+        allpassOut = delayed + feedforward
+
+        buffer[index] = allpassOut + delayed * 0.5
+        allpassIndices[j] = (index + 1) % delay
+      }
+
+      // Mix wet and dry signals
+      output[i] = input[i] * dryLevel + allpassOut * wetLevel
+    }
+
+    return output
+  }
+
+  /**
+   * Multi-band Equalizer (10 bands: 31, 62, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz)
+   */
+  equalizer(input, bands) {
+    // bands is an object: { 31: 0, 62: 0, 125: 0, 250: 0, 500: 0, 1000: 0, 2000: 0, 4000: 0, 8000: 0, 16000: 0 }
+    // Values are in dB (-12 to +12)
+
+    const frequencies = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+    let output = new Float32Array(input)
+
+    // Apply each band filter
+    for (const freq of frequencies) {
+      const gainDB = bands[freq] || 0
+      if (Math.abs(gainDB) < 0.1) continue // Skip if no change
+
+      const gain = Math.pow(10, gainDB / 20)
+      const Q = 1.0 // Quality factor (bandwidth)
+
+      // Calculate filter coefficients for peak filter
+      const w0 = 2 * Math.PI * freq / this.sampleRate
+      const alpha = Math.sin(w0) / (2 * Q)
+      const A = gain
+
+      const b0 = 1 + alpha * A
+      const b1 = -2 * Math.cos(w0)
+      const b2 = 1 - alpha * A
+      const a0 = 1 + alpha / A
+      const a1 = -2 * Math.cos(w0)
+      const a2 = 1 - alpha / A
+
+      // Apply biquad filter
+      const temp = new Float32Array(output.length)
+      temp[0] = output[0]
+      temp[1] = output[1]
+
+      for (let i = 2; i < output.length; i++) {
+        temp[i] = (b0/a0) * output[i] + (b1/a0) * output[i-1] + (b2/a0) * output[i-2]
+                  - (a1/a0) * temp[i-1] - (a2/a0) * temp[i-2]
+      }
+
+      output = temp
+    }
+
+    return output
+  }
+
+  /**
+   * Detect pitch (fundamental frequency) using autocorrelation
+   * Returns frequency in Hz
+   */
+  detectPitch(input, minFreq = 80, maxFreq = 1000) {
+    const minPeriod = Math.floor(this.sampleRate / maxFreq)
+    const maxPeriod = Math.floor(this.sampleRate / minFreq)
+
+    // Use a window of samples for analysis
+    const windowSize = Math.min(input.length, maxPeriod * 2)
+    const window = input.slice(0, windowSize)
+
+    // Autocorrelation
+    let bestPeriod = 0
+    let bestCorrelation = 0
+
+    for (let period = minPeriod; period < maxPeriod && period < windowSize / 2; period++) {
+      let correlation = 0
+      let normalization = 0
+
+      for (let i = 0; i < windowSize - period; i++) {
+        correlation += window[i] * window[i + period]
+        normalization += window[i] * window[i]
+      }
+
+      if (normalization > 0) {
+        correlation /= normalization
+
+        if (correlation > bestCorrelation) {
+          bestCorrelation = correlation
+          bestPeriod = period
+        }
+      }
+    }
+
+    if (bestPeriod === 0 || bestCorrelation < 0.1) {
+      return 0 // No clear pitch detected
+    }
+
+    // Refine using parabolic interpolation
+    const frequency = this.sampleRate / bestPeriod
+
+    return Math.round(frequency * 10) / 10 // Round to 1 decimal
+  }
+
+  /**
+   * Get note name from frequency
+   */
+  frequencyToNote(frequency) {
+    if (frequency === 0) return ''
+
+    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+    const A4 = 440
+    const C0 = A4 * Math.pow(2, -4.75) // C0 frequency
+
+    const halfSteps = 12 * Math.log2(frequency / C0)
+    const octave = Math.floor(halfSteps / 12)
+    const note = Math.round(halfSteps) % 12
+
+    const cents = Math.round((halfSteps - Math.round(halfSteps)) * 100)
+    const centsStr = cents > 0 ? `+${cents}¢` : cents < 0 ? `${cents}¢` : ''
+
+    return `${noteNames[note]}${octave} ${centsStr}`.trim()
+  }
 }
 
 export default AdvancedEffects

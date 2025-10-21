@@ -687,7 +687,7 @@ export const useAudioStore = defineStore('audio', {
         const channelData = clip.buffer.getChannelData(0)
         let processedData
 
-        // Apply effect using WASM bridge
+        // Apply effect using WASM bridge or advancedEffects
         switch (effectName) {
           case 'amplify':
             processedData = this.wasmBridge.amplify(channelData, params.factor)
@@ -718,6 +718,21 @@ export const useAudioStore = defineStore('audio', {
               params.attack,
               params.release
             )
+            break
+          case 'reverb':
+            processedData = this.advancedEffects.reverb(
+              channelData,
+              params.roomSize,
+              params.damping,
+              params.wetLevel,
+              params.dryLevel
+            )
+            break
+          case 'equalizer':
+            processedData = this.advancedEffects.equalizer(channelData, params.bands)
+            break
+          case 'pitch':
+            processedData = this.advancedEffects.changePitch(channelData, params.semitones)
             break
           default:
             console.warn('Unknown effect:', effectName)
@@ -770,6 +785,21 @@ export const useAudioStore = defineStore('audio', {
                 params.attack,
                 params.release
               )
+              break
+            case 'reverb':
+              processedChannelData = this.advancedEffects.reverb(
+                channelData,
+                params.roomSize,
+                params.damping,
+                params.wetLevel,
+                params.dryLevel
+              )
+              break
+            case 'equalizer':
+              processedChannelData = this.advancedEffects.equalizer(channelData, params.bands)
+              break
+            case 'pitch':
+              processedChannelData = this.advancedEffects.changePitch(channelData, params.semitones)
               break
             default:
               processedChannelData = channelData
@@ -838,7 +868,7 @@ export const useAudioStore = defineStore('audio', {
         const selectedData = channelData.slice(startSample, endSample)
         let processedData
 
-        // Apply effect using WASM bridge
+        // Apply effect using WASM bridge or advancedEffects
         switch (effectName) {
           case 'amplify':
             processedData = this.wasmBridge.amplify(selectedData, params.factor)
@@ -869,6 +899,21 @@ export const useAudioStore = defineStore('audio', {
               params.attack,
               params.release
             )
+            break
+          case 'reverb':
+            processedData = this.advancedEffects.reverb(
+              selectedData,
+              params.roomSize,
+              params.damping,
+              params.wetLevel,
+              params.dryLevel
+            )
+            break
+          case 'equalizer':
+            processedData = this.advancedEffects.equalizer(selectedData, params.bands)
+            break
+          case 'pitch':
+            processedData = this.advancedEffects.changePitch(selectedData, params.semitones)
             break
           default:
             console.warn('Unknown effect:', effectName)

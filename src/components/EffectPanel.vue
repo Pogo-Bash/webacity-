@@ -188,6 +188,98 @@
         <p class="text-xs text-gray-400 mb-2">Reverse the audio playback</p>
         <button @click="applyReverse" class="btn-apply">Apply Reverse</button>
       </div>
+
+      <!-- Equalizer -->
+      <div class="effect-panel">
+        <h4 class="text-white text-sm font-medium mb-3">Equalizer (10-Band)</h4>
+        <div class="space-y-2">
+          <div v-for="freq in equalizerBands" :key="freq" class="flex items-center gap-2">
+            <label class="text-xs text-gray-400 w-12">{{ freq >= 1000 ? (freq / 1000) + 'k' : freq }}</label>
+            <input
+              type="range"
+              min="-12"
+              max="12"
+              step="0.5"
+              v-model.number="eqGains[freq]"
+              class="flex-1"
+            />
+            <span class="text-xs text-white w-12 text-right">{{ eqGains[freq] > 0 ? '+' : '' }}{{ eqGains[freq] }}dB</span>
+          </div>
+          <div class="flex gap-2">
+            <button @click="resetEqualizer" class="btn-apply bg-gray-700">Reset</button>
+            <button @click="applyEqualizer" class="btn-apply flex-1">Apply Equalizer</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pitch Shift -->
+      <div class="effect-panel">
+        <h4 class="text-white text-sm font-medium mb-3">Pitch Shift</h4>
+        <div class="space-y-2">
+          <!-- Pitch Detector Display -->
+          <div v-if="detectedPitch" class="bg-gray-700 rounded p-2 mb-2">
+            <div class="text-xs text-gray-400">Current Pitch:</div>
+            <div class="text-lg text-blue-400 font-bold">{{ detectedPitch.frequency }} Hz</div>
+            <div class="text-sm text-white">{{ detectedPitch.note }}</div>
+          </div>
+          <div class="flex items-center justify-between">
+            <label class="text-xs text-gray-400">Semitones</label>
+            <span class="text-xs text-white">{{ pitchShiftSemitones > 0 ? '+' : '' }}{{ pitchShiftSemitones }}</span>
+          </div>
+          <input
+            type="range"
+            min="-12"
+            max="12"
+            step="1"
+            v-model.number="pitchShiftSemitones"
+            @input="updatePitchPreview"
+            class="w-full"
+          />
+          <div v-if="pitchPreview" class="text-xs text-gray-400">
+            Preview: {{ pitchPreview.frequency }} Hz ({{ pitchPreview.note }})
+          </div>
+          <div class="flex gap-2">
+            <button @click="detectPitchNow" class="btn-apply bg-gray-700">Detect Pitch</button>
+            <button @click="applyPitchShift" class="btn-apply flex-1">Apply Pitch Shift</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Reverb -->
+      <div class="effect-panel">
+        <h4 class="text-white text-sm font-medium mb-3">Reverb</h4>
+        <div class="space-y-3">
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-gray-400">Room Size</label>
+              <span class="text-xs text-white">{{ (reverbRoomSize * 100).toFixed(0) }}%</span>
+            </div>
+            <input type="range" min="0" max="1" step="0.05" v-model.number="reverbRoomSize" class="w-full" />
+          </div>
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-gray-400">Damping</label>
+              <span class="text-xs text-white">{{ (reverbDamping * 100).toFixed(0) }}%</span>
+            </div>
+            <input type="range" min="0" max="1" step="0.05" v-model.number="reverbDamping" class="w-full" />
+          </div>
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-gray-400">Wet Level</label>
+              <span class="text-xs text-white">{{ (reverbWetLevel * 100).toFixed(0) }}%</span>
+            </div>
+            <input type="range" min="0" max="1" step="0.05" v-model.number="reverbWetLevel" class="w-full" />
+          </div>
+          <div>
+            <div class="flex items-center justify-between">
+              <label class="text-xs text-gray-400">Dry Level</label>
+              <span class="text-xs text-white">{{ (reverbDryLevel * 100).toFixed(0) }}%</span>
+            </div>
+            <input type="range" min="0" max="1" step="0.05" v-model.number="reverbDryLevel" class="w-full" />
+          </div>
+          <button @click="applyReverb" class="btn-apply">Apply Reverb</button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -230,6 +322,32 @@ const compThreshold = ref(0.5)
 const compRatio = ref(4)
 const compAttack = ref(0.005)
 const compRelease = ref(0.1)
+
+// Equalizer parameters
+const equalizerBands = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000]
+const eqGains = ref({
+  31: 0,
+  62: 0,
+  125: 0,
+  250: 0,
+  500: 0,
+  1000: 0,
+  2000: 0,
+  4000: 0,
+  8000: 0,
+  16000: 0
+})
+
+// Pitch shift parameters
+const pitchShiftSemitones = ref(0)
+const detectedPitch = ref(null)
+const pitchPreview = ref(null)
+
+// Reverb parameters
+const reverbRoomSize = ref(0.5)
+const reverbDamping = ref(0.5)
+const reverbWetLevel = ref(0.3)
+const reverbDryLevel = ref(0.7)
 
 // Helper function to apply effects with undo support
 function applyEffectWithUndo(effectName, params) {
@@ -306,6 +424,76 @@ function applyCompress() {
 
 function applyReverse() {
   applyEffectWithUndo('reverse', {})
+}
+
+function resetEqualizer() {
+  for (const freq of equalizerBands) {
+    eqGains.value[freq] = 0
+  }
+}
+
+function applyEqualizer() {
+  applyEffectWithUndo('equalizer', { bands: { ...eqGains.value } })
+}
+
+function detectPitchNow() {
+  // Get the current audio data to analyze
+  const clipData = audioStore.selectedClip
+  if (!clipData) {
+    if (selectedTrack.value?.buffer) {
+      // Use track buffer if no clip selected
+      const channelData = selectedTrack.value.buffer.getChannelData(0)
+      const frequency = audioStore.advancedEffects.detectPitch(channelData)
+      const note = audioStore.advancedEffects.frequencyToNote(frequency)
+      detectedPitch.value = { frequency, note }
+    }
+    return
+  }
+
+  const { clip } = clipData
+  if (!clip.buffer) return
+
+  const channelData = clip.buffer.getChannelData(0)
+  const frequency = audioStore.advancedEffects.detectPitch(channelData)
+  const note = audioStore.advancedEffects.frequencyToNote(frequency)
+  detectedPitch.value = { frequency, note }
+  updatePitchPreview()
+}
+
+function updatePitchPreview() {
+  if (!detectedPitch.value) return
+
+  const originalFreq = detectedPitch.value.frequency
+  if (originalFreq === 0) {
+    pitchPreview.value = null
+    return
+  }
+
+  const ratio = Math.pow(2, pitchShiftSemitones.value / 12)
+  const newFreq = Math.round(originalFreq * ratio * 10) / 10
+  const newNote = audioStore.advancedEffects.frequencyToNote(newFreq)
+  pitchPreview.value = { frequency: newFreq, note: newNote }
+}
+
+function applyPitchShift() {
+  if (pitchShiftSemitones.value === 0) {
+    alert('No pitch shift selected (0 semitones)')
+    return
+  }
+  applyEffectWithUndo('pitch', { semitones: pitchShiftSemitones.value })
+  // Update detected pitch after applying
+  if (detectedPitch.value) {
+    detectPitchNow()
+  }
+}
+
+function applyReverb() {
+  applyEffectWithUndo('reverb', {
+    roomSize: reverbRoomSize.value,
+    damping: reverbDamping.value,
+    wetLevel: reverbWetLevel.value,
+    dryLevel: reverbDryLevel.value
+  })
 }
 </script>
 
