@@ -55,6 +55,7 @@
         @dragover.prevent="handleDragOver"
         @dragleave="handleDragLeave"
         @drop.prevent="handleDrop"
+        @contextmenu.prevent="handleContextMenu"
       ></canvas>
 
       <!-- Selection overlay -->
@@ -115,12 +116,22 @@
         {{ formatDuration(track.duration || 0) }}
       </div>
     </div>
+
+    <!-- Context Menu -->
+    <ContextMenu
+      :visible="showContextMenu"
+      :position="contextMenuPosition"
+      :track-id="track.id"
+      @close="showContextMenu = false"
+      @effect="handleEffectFromMenu"
+    />
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, watch, computed } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
+import ContextMenu from './ContextMenu.vue'
 
 const props = defineProps({
   track: {
@@ -136,6 +147,8 @@ const volume = ref(props.track.volume)
 const pan = ref(props.track.pan)
 const isSelecting = ref(false)
 const isDraggingOver = ref(false)
+const showContextMenu = ref(false)
+const contextMenuPosition = ref({ x: 0, y: 0 })
 
 const selectionStyle = computed(() => {
   if (!audioStore.selection || audioStore.selection.trackId !== props.track.id) return {}
@@ -347,6 +360,22 @@ function endSelection() {
       audioStore.clearSelection()
     }
   }
+}
+
+function handleContextMenu(e) {
+  showContextMenu.value = false
+  // Use nextTick to ensure menu closes before reopening
+  setTimeout(() => {
+    contextMenuPosition.value = { x: e.clientX, y: e.clientY }
+    showContextMenu.value = true
+    audioStore.selectedTrackId = props.track.id
+  }, 10)
+}
+
+function handleEffectFromMenu(effectName) {
+  console.log('Apply effect from context menu:', effectName)
+  // This will open the effects panel with the specific effect
+  // For now, we'll just log it - you could emit an event to parent
 }
 
 function handleDragOver(e) {

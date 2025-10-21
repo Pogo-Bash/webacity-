@@ -55,13 +55,19 @@
           </div>
 
           <!-- Mini Waveform -->
-          <canvas
-            :ref="el => { if (el) snippetCanvases[snippet.id] = el }"
-            class="w-full h-12 bg-gray-800 rounded"
-          ></canvas>
+          <div class="relative w-full h-12 bg-gray-800 rounded overflow-hidden">
+            <canvas
+              :ref="el => { if (el) snippetCanvases[snippet.id] = el }"
+              class="h-full bg-gray-850"
+              :style="{ width: getSnippetWidth(snippet) }"
+            ></canvas>
+          </div>
 
           <div class="mt-2 text-xs text-gray-400">
             Duration: {{ snippet.duration.toFixed(2) }}s
+            <span v-if="audioStore.duration > 0" class="ml-2 text-gray-500">
+              ({{ ((snippet.duration / audioStore.duration) * 100).toFixed(1) }}% of project)
+            </span>
           </div>
 
           <div class="mt-2 text-xs text-gray-500 italic">
@@ -113,6 +119,18 @@ function removeSnippet(snippetId) {
   if (confirm('Remove this snippet?')) {
     audioStore.removeSnippet(snippetId)
   }
+}
+
+function getSnippetWidth(snippet) {
+  // Scale snippet width based on its duration relative to the longest track
+  const projectDuration = audioStore.duration || 1
+  const ratio = snippet.duration / projectDuration
+  const minWidth = 20 // Minimum width in pixels
+  const maxWidth = 100 // Maximum width percentage
+
+  // Calculate width as percentage, ensuring it's at least visible
+  const widthPercent = Math.max(minWidth, Math.min(ratio * 100, maxWidth))
+  return `${widthPercent}%`
 }
 
 function handleDragStart(snippet, event) {
