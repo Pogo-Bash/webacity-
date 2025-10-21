@@ -578,13 +578,20 @@ export const useAudioStore = defineStore('audio', {
      * Apply effect to selected clip
      */
     async applyEffectToClip(effectName, params) {
+      console.log('🎵 Applying effect to clip:', effectName, params)
+
       if (!this.selectedClipId) {
-        console.log('No clip selected for effect')
+        console.log('❌ No clip selected for effect')
         return false
       }
 
       const clipData = this.selectedClip
-      if (!clipData) return false
+      if (!clipData) {
+        console.log('❌ No clip data found')
+        return false
+      }
+
+      console.log('✅ Found clip:', clipData.clip.name)
 
       const { clip, trackId } = clipData
       const track = this.tracks.find(t => t.id === trackId)
@@ -687,22 +694,36 @@ export const useAudioStore = defineStore('audio', {
 
         // Find the clip index in the track
         const clipIndex = track.clips.findIndex(c => c.id === this.selectedClipId)
-        if (clipIndex === -1) return false
+        if (clipIndex === -1) {
+          console.error('Clip index not found!')
+          return false
+        }
+
+        console.log('Found clip at index:', clipIndex)
 
         // Create a new clip object with updated buffer and waveform (to trigger Vue reactivity)
         const updatedClip = {
           ...clip,
           buffer: newBuffer,
-          waveformData: this.generateWaveformData(newBuffer)
+          waveformData: this.generateWaveformData(newBuffer),
+          // Add a timestamp to force reactivity
+          _lastModified: Date.now()
         }
+
+        console.log('Created updated clip with new waveform data')
 
         // Replace the clip in the array (this triggers Vue reactivity)
         track.clips.splice(clipIndex, 1, updatedClip)
 
+        // Force reactivity by reassigning the clips array
+        track.clips = [...track.clips]
+
+        console.log('Updated clips array')
+
         // Rebuild track buffer from all clips
         this.updateTrackBufferFromClips(trackId)
 
-        console.log(`Applied ${effectName} to clip "${clip.name}"`)
+        console.log(`Applied ${effectName} to clip "${clip.name}" - effect complete`)
         return true
       } catch (error) {
         console.error('Failed to apply effect to clip:', error)

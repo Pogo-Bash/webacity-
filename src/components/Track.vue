@@ -61,7 +61,7 @@
       <!-- Audio clips -->
       <AudioClip
         v-for="clip in track.clips"
-        :key="clip.id"
+        :key="clip.id + '-' + (clip._lastModified || 0)"
         :clip="clip"
         :track-id="track.id"
         :project-duration="audioStore.duration || 1"
