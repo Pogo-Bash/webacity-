@@ -22,60 +22,6 @@
 
       <div v-if="hasSelection" class="divider"></div>
 
-      <!-- Effects Menu -->
-      <div v-if="hasSelection || hasTrack" class="submenu-container">
-        <button
-          class="menu-item"
-          @mouseenter="activeSubmenu = 'effects'"
-          @click="activeSubmenu = activeSubmenu === 'effects' ? null : 'effects'"
-        >
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/>
-          </svg>
-          <span>Effects</span>
-          <svg class="w-4 h-4 ml-auto" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M8.59 16.59L13.17 12 8.59 7.41 10 6l6 6-6 6-1.41-1.41z"/>
-          </svg>
-        </button>
-
-        <!-- Effects Submenu -->
-        <div
-          v-if="activeSubmenu === 'effects'"
-          class="submenu"
-          :style="{ left: '100%', top: '0' }"
-        >
-          <button @click="applyEffect('amplify')" class="menu-item">
-            <span>Amplify...</span>
-          </button>
-          <button @click="applyEffect('normalize')" class="menu-item">
-            <span>Normalize</span>
-          </button>
-          <div class="divider"></div>
-          <button @click="applyEffect('fadeIn')" class="menu-item">
-            <span>Fade In</span>
-          </button>
-          <button @click="applyEffect('fadeOut')" class="menu-item">
-            <span>Fade Out</span>
-          </button>
-          <div class="divider"></div>
-          <button @click="applyEffect('reverse')" class="menu-item">
-            <span>Reverse</span>
-          </button>
-          <div class="divider"></div>
-          <button @click="applyEffect('lowPass')" class="menu-item">
-            <span>Low Pass Filter...</span>
-          </button>
-          <button @click="applyEffect('highPass')" class="menu-item">
-            <span>High Pass Filter...</span>
-          </button>
-          <button @click="applyEffect('compressor')" class="menu-item">
-            <span>Compressor...</span>
-          </button>
-        </div>
-      </div>
-
-      <div v-if="hasSelection || hasTrack" class="divider"></div>
-
       <!-- Edit Actions -->
       <button
         v-if="hasSelection"
@@ -164,12 +110,11 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['close', 'effect'])
+const emit = defineEmits(['close'])
 
 const audioStore = useAudioStore()
 const historyStore = useHistoryStore()
 const menu = ref(null)
-const activeSubmenu = ref(null)
 
 const hasSelection = computed(() => audioStore.hasSelection)
 const hasTrack = computed(() => props.trackId !== null)
@@ -224,11 +169,6 @@ function handleCreateSnippet() {
   if (snippet) {
     console.log('Snippet created from context menu')
   }
-  emit('close')
-}
-
-function applyEffect(effectName) {
-  emit('effect', effectName)
   emit('close')
 }
 
@@ -301,19 +241,5 @@ function handleSelectAll() {
 
 .divider {
   @apply h-px bg-gray-700 my-1 mx-2;
-}
-
-.submenu-container {
-  @apply relative;
-}
-
-.submenu {
-  @apply absolute bg-gray-800 border border-gray-600 rounded-lg shadow-2xl py-1 min-w-[200px];
-  backdrop-filter: blur(10px);
-  background-color: rgba(31, 41, 55, 0.95);
-}
-
-.submenu .menu-item {
-  @apply justify-between;
 }
 </style>
