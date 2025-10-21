@@ -114,20 +114,29 @@ export class PasteCommand {
 
   execute() {
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
-    if (!track || !track.buffer || !this.clipboardBuffer) return
+    if (!track || !this.clipboardBuffer) return
 
-    this.previousBuffer = this.cloneBuffer(track.buffer)
+    // Save previous buffer (may be null for empty track)
+    this.previousBuffer = track.buffer ? this.cloneBuffer(track.buffer) : null
     this.audioStore.pasteAtPosition(this.trackId, this.clipboardBuffer, this.position)
   }
 
   undo() {
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
-    if (!track || !this.previousBuffer) return
+    if (!track) return
 
-    track.buffer = this.previousBuffer
-    this.audioStore.engine.setTrackBuffer(this.trackId, this.previousBuffer)
-    track.waveformData = this.audioStore.generateWaveformData(this.previousBuffer)
-    track.duration = this.previousBuffer.duration
+    // Restore previous buffer (may be null)
+    if (this.previousBuffer) {
+      track.buffer = this.previousBuffer
+      this.audioStore.engine.setTrackBuffer(this.trackId, this.previousBuffer)
+      track.waveformData = this.audioStore.generateWaveformData(this.previousBuffer)
+      track.duration = this.previousBuffer.duration
+    } else {
+      // Track was empty before, restore to empty
+      track.buffer = null
+      track.duration = 0
+      track.waveformData = []
+    }
     this.audioStore.updateDuration()
   }
 

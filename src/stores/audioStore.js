@@ -429,10 +429,44 @@ export const useAudioStore = defineStore('audio', {
      */
     pasteAtPosition(trackId, clipboardBuffer, position) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer || !clipboardBuffer) return false
+      if (!track || !clipboardBuffer) return false
 
       const positionSample = Math.floor(position * this.sampleRate)
       const clipLength = clipboardBuffer.length
+
+      // If track is empty, create a buffer with the clipboard at the specified position
+      if (!track.buffer) {
+        const newLength = positionSample + clipLength
+
+        // Create new buffer filled with silence
+        const newBuffer = this.engine.audioContext.createBuffer(
+          clipboardBuffer.numberOfChannels,
+          newLength,
+          this.sampleRate
+        )
+
+        // Copy clipboard data at the specified position
+        for (let ch = 0; ch < clipboardBuffer.numberOfChannels; ch++) {
+          const destData = newBuffer.getChannelData(ch)
+          const clipData = clipboardBuffer.getChannelData(ch)
+
+          // Place clipboard at position (buffer is already zeroed/silent)
+          for (let i = 0; i < clipLength; i++) {
+            destData[positionSample + i] = clipData[i]
+          }
+        }
+
+        // Update track
+        track.buffer = newBuffer
+        track.duration = newBuffer.duration
+        this.engine.setTrackBuffer(trackId, newBuffer)
+        track.waveformData = this.generateWaveformData(newBuffer)
+        this.updateDuration()
+        console.log('Pasted into empty track at position', position)
+        return true
+      }
+
+      // Track has audio - insert clipboard at position (splice)
       const newLength = track.buffer.length + clipLength
 
       // Create new buffer with pasted audio
@@ -790,32 +824,57 @@ export const useAudioStore = defineStore('audio', {
         return false
       }
 
-      // If track is empty, just place the snippet directly
+      const sampleRate = snippet.buffer.sampleRate
+      const positionSample = Math.floor(position * sampleRate)
+      const snippetLength = snippet.buffer.length
+
+      // If track is empty, create a buffer with the snippet at the specified position
       if (!track.buffer) {
-        track.buffer = snippet.buffer
-        track.duration = snippet.buffer.duration
-        track.waveformData = this.generateWaveformData(snippet.buffer)
-        this.engine.setTrackBuffer(trackId, snippet.buffer)
+        // Calculate buffer size: position + snippet length
+        const newLength = positionSample + snippetLength
+
+        // Create new buffer filled with silence
+        const newBuffer = this.engine.audioContext.createBuffer(
+          snippet.buffer.numberOfChannels,
+          newLength,
+          sampleRate
+        )
+
+        // Copy snippet data at the specified position
+        for (let channel = 0; channel < snippet.buffer.numberOfChannels; channel++) {
+          const destData = newBuffer.getChannelData(channel)
+          const snippetData = snippet.buffer.getChannelData(channel)
+
+          // Place snippet at position (buffer is already zeroed/silent)
+          for (let i = 0; i < snippetLength; i++) {
+            destData[positionSample + i] = snippetData[i]
+          }
+        }
+
+        // Update track
+        track.buffer = newBuffer
+        track.duration = newBuffer.duration
+        track.waveformData = this.generateWaveformData(newBuffer)
+        this.engine.setTrackBuffer(trackId, newBuffer)
         this.updateDuration()
-        console.log('Placed snippet in empty track')
+        console.log('Placed snippet in empty track at position', position)
         return true
       }
 
-      const sampleRate = track.buffer.sampleRate
-      const positionSample = Math.floor(position * sampleRate)
+      // Track has existing audio - mix the snippet in
+      const positionSampleInTrack = Math.floor(position * track.buffer.sampleRate)
 
       // Calculate new buffer size
-      const snippetLength = snippet.buffer.length
       const newLength = Math.max(
         track.buffer.length,
-        positionSample + snippetLength
+        positionSampleInTrack + snippetLength
       )
 
       // Create new buffer
       const newBuffer = this.engine.audioContext.createBuffer(
         track.buffer.numberOfChannels,
         newLength,
-        sampleRate
+        track.buffer.sampleRate
       )
 
       // Copy original track data
@@ -832,7 +891,7 @@ export const useAudioStore = defineStore('audio', {
           Math.min(channel, snippet.buffer.numberOfChannels - 1)
         )
         for (let i = 0; i < snippetLength; i++) {
-          const destIndex = positionSample + i
+          const destIndex = positionSampleInTrack + i
           if (destIndex < newLength) {
             // Mix audio (average if overlapping)
             destData[destIndex] = (destData[destIndex] + snippetData[i]) / 2
