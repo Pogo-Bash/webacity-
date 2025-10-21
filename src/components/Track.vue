@@ -56,6 +56,7 @@
       @dragover.prevent="handleDragOver"
       @dragleave="handleDragLeave"
       @drop.prevent="handleDrop"
+      @contextmenu.prevent="handleContextMenu"
     >
       <!-- Audio clips -->
       <AudioClip
@@ -433,9 +434,10 @@ function handleEffectFromMenu(effectName) {
 function handleDragOver(e) {
   isDraggingOver.value = true
 
-  const type = e.dataTransfer.types.includes('type') ? e.dataTransfer.getData('type') : null
+  // Check if it's a clip being dragged (check types array)
+  const isClip = e.dataTransfer.types.includes('clipid')
 
-  if (type === 'audio-clip') {
+  if (isClip) {
     e.dataTransfer.dropEffect = 'move'
 
     // Show snap guide
@@ -449,6 +451,7 @@ function handleDragOver(e) {
     const snappedTime = Math.round(time / snapInterval) * snapInterval
     snapGuidePosition.value = (snappedTime / projectDuration) * rect.width
   } else {
+    // Might be a snippet or file
     e.dataTransfer.dropEffect = 'copy'
   }
 }
@@ -462,18 +465,13 @@ function handleDrop(e) {
   isDraggingOver.value = false
   snapGuidePosition.value = null
 
-  const type = e.dataTransfer.getData('type')
+  // Try to get clip data first
+  const clipId = e.dataTransfer.getData('clipId')
+  const fromTrackId = e.dataTransfer.getData('trackId')
 
   // Handle clip drop (moving between tracks or within track)
-  if (type === 'audio-clip') {
-    const clipId = e.dataTransfer.getData('clipId')
-    const fromTrackId = e.dataTransfer.getData('trackId')
-    const offsetX = parseFloat(e.dataTransfer.getData('offsetX'))
-
-    if (!clipId || !fromTrackId) {
-      console.log('No clip ID or track ID in drop event')
-      return
-    }
+  if (clipId && fromTrackId) {
+    const offsetX = parseFloat(e.dataTransfer.getData('offsetX')) || 0
 
     // Calculate new position from drop location
     const rect = trackContainer.value.getBoundingClientRect()
@@ -513,7 +511,7 @@ function handleDrop(e) {
     return
   }
 
-  console.log('Unknown drop type')
+  console.log('Drop event - no recognized data')
 }
 
 function deleteClip(clipId) {

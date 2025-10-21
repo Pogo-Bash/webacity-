@@ -124,7 +124,7 @@ import SettingsPanel from './components/SettingsPanel.vue'
 
 const audioStore = useAudioStore()
 const historyStore = useHistoryStore()
-const { tracks, selectedTrack } = storeToRefs(audioStore)
+const { tracks, selectedTrack, currentTime, duration } = storeToRefs(audioStore)
 
 const mainContent = ref(null)
 const timeline = ref(null)
@@ -136,18 +136,18 @@ const fileInput = ref(null)
 
 // Calculate playhead position for global overlay
 const playheadPosition = computed(() => {
-  // Reference currentTime and duration to make reactive
-  const time = audioStore.currentTime
-  const duration = audioStore.duration
+  // Use refs from storeToRefs for reactivity
+  const time = currentTime.value
+  const dur = duration.value
 
-  if (!timeline.value || duration === 0) return 0
+  if (!timeline.value || dur === 0) return 0
 
   // Get the timeline ruler element from the Timeline component
   const timelineEl = timeline.value.$el?.querySelector('.timeline-container')
   if (!timelineEl) return 0
 
   const rect = timelineEl.getBoundingClientRect()
-  const ratio = time / duration
+  const ratio = time / dur
   return rect.left + (rect.width * ratio)
 })
 
