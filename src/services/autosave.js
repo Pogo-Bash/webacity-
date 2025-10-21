@@ -137,14 +137,8 @@ export class AutosaveService {
       pan: track.pan,
       muted: track.muted,
       solo: track.solo,
-      clips: track.clips.map(clip => ({
-        id: clip.id,
-        startTime: clip.startTime,
-        duration: clip.duration,
-        fileName: clip.fileName,
-        // Note: We can't save the actual audio buffer
-        // Users will need to re-import audio files
-      }))
+      hadClips: track.clips.length > 0,
+      clipFiles: track.clips.map(clip => clip.fileName || clip.name || 'Unknown').filter(Boolean)
     }))
 
     return {
@@ -172,7 +166,7 @@ export class AutosaveService {
     this.audioStore.masterVolume = projectData.masterVolume || 1
     this.audioStore.sampleRate = projectData.sampleRate || 44100
 
-    // Restore track structure (without audio buffers)
+    // Restore track structure (without clips - they have no audio data)
     projectData.tracks.forEach(trackData => {
       const track = {
         id: trackData.id,
@@ -182,24 +176,37 @@ export class AutosaveService {
         pan: trackData.pan,
         muted: trackData.muted,
         solo: trackData.solo,
-        clips: trackData.clips.map(clipData => ({
-          id: clipData.id,
-          startTime: clipData.startTime,
-          duration: clipData.duration,
-          fileName: clipData.fileName,
-          buffer: null, // Will need to re-import
-          waveformData: []
-        })),
+        clips: [], // Don't restore clips without audio buffers
         buffer: null,
-        duration: trackData.clips.reduce((max, clip) =>
-          Math.max(max, clip.startTime + clip.duration), 0)
+        duration: 0,
+        waveformData: null
       }
       this.audioStore.tracks.push(track)
     })
 
-    // Show message about re-importing audio
-    if (projectData.tracks.some(t => t.clips.length > 0)) {
-      alert('Project structure restored! Note: You will need to re-import your audio files.')
+    // Build message about what needs to be re-imported
+    const filesNeeded = projectData.tracks
+      .filter(t => t.hadClips && t.clipFiles && t.clipFiles.length > 0)
+      .map(t => `${t.name}: ${t.clipFiles.join(', ')}`)
+      .filter(Boolean)
+
+    // Show message about restored project
+    if (filesNeeded.length > 0) {
+      const filesList = filesNeeded.join('\n')
+      alert(
+        `Project structure restored!\n\n` +
+        `Project: ${projectData.projectName}\n` +
+        `Tracks: ${projectData.tracks.length}\n\n` +
+        `⚠️ Audio files need to be re-imported:\n${filesList}\n\n` +
+        `Note: Audio data cannot be stored in browser storage.`
+      )
+    } else {
+      alert(
+        `Project restored!\n\n` +
+        `Project: ${projectData.projectName}\n` +
+        `Tracks: ${projectData.tracks.length}\n\n` +
+        `You can now import audio files to your tracks.`
+      )
     }
   }
 
