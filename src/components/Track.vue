@@ -41,19 +41,20 @@
     </div>
 
     <!-- Waveform Display -->
-    <div class="relative bg-gray-900 h-32" @click="selectTrack">
+    <div class="relative bg-gray-900 h-32">
       <canvas
         ref="waveformCanvas"
         class="waveform-canvas w-full h-full"
         @mousedown="startSelection"
         @mousemove="updateSelection"
         @mouseup="endSelection"
+        @mouseleave="endSelection"
       ></canvas>
 
       <!-- Selection overlay -->
       <div
-        v-if="selectionStart !== null && selectionEnd !== null"
-        class="absolute top-0 bottom-0 bg-blue-500 bg-opacity-30 pointer-events-none"
+        v-if="audioStore.selection && audioStore.selection.trackId === track.id"
+        class="absolute top-0 bottom-0 bg-white bg-opacity-20 pointer-events-none border-l-2 border-r-2 border-white"
         :style="selectionStyle"
       ></div>
     </div>
@@ -115,19 +116,25 @@ const audioStore = useAudioStore()
 const waveformCanvas = ref(null)
 const volume = ref(props.track.volume)
 const pan = ref(props.track.pan)
-const selectionStart = ref(null)
-const selectionEnd = ref(null)
 const isSelecting = ref(false)
 
 const selectionStyle = computed(() => {
-  if (selectionStart.value === null || selectionEnd.value === null) return {}
+  if (!audioStore.selection || audioStore.selection.trackId !== props.track.id) return {}
 
-  const left = Math.min(selectionStart.value, selectionEnd.value)
-  const right = Math.max(selectionStart.value, selectionEnd.value)
+  if (!props.track.duration) return {}
+
+  const canvas = waveformCanvas.value
+  if (!canvas) return {}
+
+  const rect = canvas.getBoundingClientRect()
+  const { startTime, endTime } = audioStore.selection
+
+  const leftPx = (startTime / props.track.duration) * rect.width
+  const rightPx = (endTime / props.track.duration) * rect.width
 
   return {
-    left: `${left}px`,
-    width: `${right - left}px`
+    left: `${leftPx}px`,
+    width: `${rightPx - leftPx}px`
   }
 })
 
@@ -224,21 +231,48 @@ function updateTrackName() {
   // Track name is already bound via v-model
 }
 
+let selectionStartTime = 0
+
 function startSelection(e) {
+  // Only select on left click
+  if (e.button !== 0) return
+
   const rect = waveformCanvas.value.getBoundingClientRect()
-  selectionStart.value = e.clientX - rect.left
-  selectionEnd.value = selectionStart.value
+  const x = e.clientX - rect.left
+  const duration = props.track.duration || 0
+
+  // Convert pixel to time
+  selectionStartTime = (x / rect.width) * duration
+
   isSelecting.value = true
+  audioStore.selectedTrackId = props.track.id
 }
 
 function updateSelection(e) {
   if (!isSelecting.value) return
+
   const rect = waveformCanvas.value.getBoundingClientRect()
-  selectionEnd.value = e.clientX - rect.left
+  const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
+  const duration = props.track.duration || 0
+
+  // Convert pixel to time
+  const currentTime = (x / rect.width) * duration
+
+  // Update selection in store
+  audioStore.setSelection(props.track.id, selectionStartTime, currentTime)
 }
 
 function endSelection() {
+  if (!isSelecting.value) return
   isSelecting.value = false
+
+  // Clear selection if it's too small (less than 0.01 seconds)
+  if (audioStore.selection) {
+    const { startTime, endTime } = audioStore.selection
+    if (Math.abs(endTime - startTime) < 0.01) {
+      audioStore.clearSelection()
+    }
+  }
 }
 
 function formatDuration(seconds) {

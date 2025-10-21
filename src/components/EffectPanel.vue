@@ -187,6 +187,8 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
+import { useHistoryStore } from '../stores/historyStore'
+import { ApplyEffectCommand } from '../utils/commands'
 import { storeToRefs } from 'pinia'
 
 defineProps({
@@ -199,7 +201,8 @@ defineProps({
 defineEmits(['close'])
 
 const audioStore = useAudioStore()
-const { selectedTrack } = storeToRefs(audioStore)
+const historyStore = useHistoryStore()
+const { selectedTrack, selection } = storeToRefs(audioStore)
 
 // Effect parameters
 const amplifyFactor = ref(2)
@@ -213,107 +216,62 @@ const compRatio = ref(4)
 const compAttack = ref(0.005)
 const compRelease = ref(0.1)
 
-async function applyAmplify() {
+// Helper function to apply effects with undo support
+function applyEffectWithUndo(effectName, params) {
   if (!selectedTrack.value) return
   try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'amplify', {
-      factor: amplifyFactor.value
-    })
-    console.log('Amplify applied')
+    const command = new ApplyEffectCommand(
+      audioStore,
+      selectedTrack.value.id,
+      effectName,
+      params,
+      selection.value
+    )
+    historyStore.execute(command)
+    console.log(`${effectName} applied` + (selection.value ? ' to selection' : ''))
   } catch (error) {
-    console.error('Failed to apply amplify:', error)
+    console.error(`Failed to apply ${effectName}:`, error)
     alert('Failed to apply effect')
   }
 }
 
-async function applyNormalize() {
-  if (!selectedTrack.value) return
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'normalize', {
-      targetPeak: targetPeak.value
-    })
-    console.log('Normalize applied')
-  } catch (error) {
-    console.error('Failed to apply normalize:', error)
-    alert('Failed to apply effect')
-  }
+function applyAmplify() {
+  applyEffectWithUndo('amplify', { factor: amplifyFactor.value })
 }
 
-async function applyFadeIn() {
-  if (!selectedTrack.value) return
+function applyNormalize() {
+  applyEffectWithUndo('normalize', { targetPeak: targetPeak.value })
+}
+
+function applyFadeIn() {
   const samples = Math.floor((fadeInDuration.value / 1000) * audioStore.sampleRate)
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'fadeIn', { samples })
-    console.log('Fade in applied')
-  } catch (error) {
-    console.error('Failed to apply fade in:', error)
-    alert('Failed to apply effect')
-  }
+  applyEffectWithUndo('fadeIn', { samples })
 }
 
-async function applyFadeOut() {
-  if (!selectedTrack.value) return
+function applyFadeOut() {
   const samples = Math.floor((fadeOutDuration.value / 1000) * audioStore.sampleRate)
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'fadeOut', { samples })
-    console.log('Fade out applied')
-  } catch (error) {
-    console.error('Failed to apply fade out:', error)
-    alert('Failed to apply effect')
-  }
+  applyEffectWithUndo('fadeOut', { samples })
 }
 
-async function applyLowPass() {
-  if (!selectedTrack.value) return
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'lowPass', {
-      cutoff: lowPassCutoff.value
-    })
-    console.log('Low pass filter applied')
-  } catch (error) {
-    console.error('Failed to apply low pass:', error)
-    alert('Failed to apply effect')
-  }
+function applyLowPass() {
+  applyEffectWithUndo('lowPass', { cutoff: lowPassCutoff.value })
 }
 
-async function applyHighPass() {
-  if (!selectedTrack.value) return
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'highPass', {
-      cutoff: highPassCutoff.value
-    })
-    console.log('High pass filter applied')
-  } catch (error) {
-    console.error('Failed to apply high pass:', error)
-    alert('Failed to apply effect')
-  }
+function applyHighPass() {
+  applyEffectWithUndo('highPass', { cutoff: highPassCutoff.value })
 }
 
-async function applyCompress() {
-  if (!selectedTrack.value) return
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'compress', {
-      threshold: compThreshold.value,
-      ratio: compRatio.value,
-      attack: compAttack.value,
-      release: compRelease.value
-    })
-    console.log('Compressor applied')
-  } catch (error) {
-    console.error('Failed to apply compressor:', error)
-    alert('Failed to apply effect')
-  }
+function applyCompress() {
+  applyEffectWithUndo('compress', {
+    threshold: compThreshold.value,
+    ratio: compRatio.value,
+    attack: compAttack.value,
+    release: compRelease.value
+  })
 }
 
-async function applyReverse() {
-  if (!selectedTrack.value) return
-  try {
-    await audioStore.applyEffect(selectedTrack.value.id, 'reverse', {})
-    console.log('Reverse applied')
-  } catch (error) {
-    console.error('Failed to apply reverse:', error)
-    alert('Failed to apply effect')
-  }
+function applyReverse() {
+  applyEffectWithUndo('reverse', {})
 }
 </script>
 

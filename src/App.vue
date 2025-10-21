@@ -66,9 +66,16 @@
       <div class="flex items-center justify-between">
         <div>
           Tracks: {{ tracks.length }} | Selected: {{ selectedTrack?.name || 'None' }}
+          <span v-if="audioStore.selection" class="ml-2 text-blue-400">
+            | Selection: {{ audioStore.selection.startTime.toFixed(2) }}s - {{ audioStore.selection.endTime.toFixed(2) }}s
+          </span>
         </div>
-        <div>
-          Press Spacebar to play/pause | Import audio files to start editing
+        <div class="flex gap-4">
+          <span>Space: Play/Pause</span>
+          <span>Ctrl+Z/Y: Undo/Redo</span>
+          <span>Ctrl+X/C/V: Cut/Copy/Paste</span>
+          <span>Ctrl+A: Select All</span>
+          <span>Del: Delete Selection</span>
         </div>
       </div>
     </footer>
@@ -88,6 +95,8 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { useAudioStore } from './stores/audioStore'
+import { useHistoryStore } from './stores/historyStore'
+import { DeleteSelectionCommand } from './utils/commands'
 import { storeToRefs } from 'pinia'
 import Toolbar from './components/Toolbar.vue'
 import Timeline from './components/Timeline.vue'
@@ -95,6 +104,7 @@ import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
 
 const audioStore = useAudioStore()
+const historyStore = useHistoryStore()
 const { tracks, selectedTrack } = storeToRefs(audioStore)
 
 const showEffects = ref(false)
@@ -117,14 +127,98 @@ onUnmounted(() => {
 })
 
 function handleKeyDown(e) {
+  // Ignore if typing in input field
+  if (isTyping(e)) return
+
   // Spacebar: Play/Pause
-  if (e.code === 'Space' && !isTyping(e)) {
+  if (e.code === 'Space') {
     e.preventDefault()
     if (audioStore.isPlaying) {
       audioStore.pause()
     } else {
       audioStore.play()
     }
+  }
+
+  // Ctrl/Cmd + Z: Undo
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) {
+    e.preventDefault()
+    if (historyStore.canUndo) {
+      historyStore.undo()
+      console.log('Undo')
+    }
+  }
+
+  // Ctrl/Cmd + Y or Ctrl/Cmd + Shift + Z: Redo
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
+    e.preventDefault()
+    if (historyStore.canRedo) {
+      historyStore.redo()
+      console.log('Redo')
+    }
+  }
+
+  // Ctrl/Cmd + X: Cut
+  if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
+    e.preventDefault()
+    if (audioStore.canCut) {
+      const command = new DeleteSelectionCommand(audioStore, audioStore.selection.trackId, audioStore.selection)
+      // Copy first, then delete with undo support
+      if (audioStore.copySelection()) {
+        historyStore.execute(command)
+        console.log('Cut selection')
+      }
+    }
+  }
+
+  // Ctrl/Cmd + C: Copy
+  if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
+    e.preventDefault()
+    if (audioStore.canCopy) {
+      audioStore.copySelection()
+      console.log('Copied selection')
+    }
+  }
+
+  // Ctrl/Cmd + V: Paste
+  if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+    e.preventDefault()
+    if (audioStore.canPaste && audioStore.clipboard) {
+      audioStore.pasteAtPosition(
+        audioStore.selectedTrackId,
+        audioStore.clipboard.buffer,
+        audioStore.currentTime
+      )
+      console.log('Pasted at', audioStore.currentTime)
+    }
+  }
+
+  // Ctrl/Cmd + A: Select All
+  if ((e.ctrlKey || e.metaKey) && e.key === 'a') {
+    e.preventDefault()
+    if (selectedTrack.value && selectedTrack.value.duration) {
+      audioStore.setSelection(selectedTrack.value.id, 0, selectedTrack.value.duration)
+      console.log('Selected all')
+    }
+  }
+
+  // Escape: Clear selection
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    audioStore.clearSelection()
+    console.log('Selection cleared')
+  }
+
+  // Delete or Backspace: Delete selection
+  if ((e.key === 'Delete' || e.key === 'Backspace') && audioStore.hasSelection) {
+    e.preventDefault()
+    const command = new DeleteSelectionCommand(
+      audioStore,
+      audioStore.selection.trackId,
+      audioStore.selection
+    )
+    historyStore.execute(command)
+    console.log('Deleted selection')
   }
 
   // Ctrl/Cmd + I: Import
@@ -137,13 +231,6 @@ function handleKeyDown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
     e.preventDefault()
     showEffects.value = !showEffects.value
-  }
-
-  // Delete: Remove selected track
-  if (e.key === 'Delete' && selectedTrack.value) {
-    if (confirm(`Delete track "${selectedTrack.value.name}"?`)) {
-      audioStore.removeTrack(selectedTrack.value.id)
-    }
   }
 }
 

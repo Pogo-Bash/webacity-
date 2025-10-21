@@ -8,6 +8,8 @@ export const useAudioStore = defineStore('audio', {
     wasmBridge: null,
     tracks: [],
     selectedTrackId: null,
+    selection: null, // { trackId, startTime, endTime }
+    clipboard: null, // { buffer, duration }
     isPlaying: false,
     currentTime: 0,
     duration: 0,
@@ -29,7 +31,17 @@ export const useAudioStore = defineStore('audio', {
 
     longestTrackDuration: (state) => {
       return Math.max(0, ...state.tracks.map(t => t.duration || 0))
-    }
+    },
+
+    hasSelection: (state) => state.selection !== null,
+
+    canCut: (state) => state.selection !== null,
+
+    canCopy: (state) => state.selection !== null,
+
+    canPaste: (state) => state.clipboard !== null && state.selectedTrackId !== null,
+
+    canDelete: (state) => state.selection !== null
   },
 
   actions: {
@@ -245,82 +257,6 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Apply effect to track
-     */
-    async applyEffect(trackId, effectName, params) {
-      const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return
-
-      try {
-        // Get buffer data
-        const channelData = track.buffer.getChannelData(0)
-        let processedData
-
-        // Apply effect using WASM bridge
-        switch (effectName) {
-          case 'amplify':
-            processedData = this.wasmBridge.amplify(channelData, params.factor)
-            break
-          case 'normalize':
-            processedData = this.wasmBridge.normalize(channelData, params.targetPeak)
-            break
-          case 'fadeIn':
-            processedData = this.wasmBridge.fadeIn(channelData, params.samples)
-            break
-          case 'fadeOut':
-            processedData = this.wasmBridge.fadeOut(channelData, params.samples)
-            break
-          case 'reverse':
-            processedData = this.wasmBridge.reverse(channelData)
-            break
-          case 'lowPass':
-            processedData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
-            break
-          case 'highPass':
-            processedData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
-            break
-          case 'compress':
-            processedData = this.wasmBridge.compress(
-              channelData,
-              params.threshold,
-              params.ratio,
-              params.attack,
-              params.release
-            )
-            break
-          default:
-            console.warn('Unknown effect:', effectName)
-            return
-        }
-
-        // Create new buffer with processed data
-        const newBuffer = this.engine.audioContext.createBuffer(
-          track.buffer.numberOfChannels,
-          track.buffer.length,
-          track.buffer.sampleRate
-        )
-
-        // Copy processed data to new buffer
-        newBuffer.getChannelData(0).set(processedData)
-
-        // If stereo, copy other channels
-        for (let i = 1; i < track.buffer.numberOfChannels; i++) {
-          newBuffer.getChannelData(i).set(track.buffer.getChannelData(i))
-        }
-
-        // Update track
-        track.buffer = newBuffer
-        this.engine.setTrackBuffer(trackId, newBuffer)
-        track.waveformData = this.generateWaveformData(newBuffer)
-
-        console.log(`Applied ${effectName} to track ${trackId}`)
-      } catch (error) {
-        console.error('Failed to apply effect:', error)
-        throw error
-      }
-    },
-
-    /**
      * Export track as WAV
      */
     exportTrack(trackId) {
@@ -352,12 +288,242 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Set selection
+     */
+    setSelection(trackId, startTime, endTime) {
+      if (startTime > endTime) {
+        [startTime, endTime] = [endTime, startTime]
+      }
+      this.selection = { trackId, startTime, endTime }
+    },
+
+    /**
+     * Clear selection
+     */
+    clearSelection() {
+      this.selection = null
+    },
+
+    /**
+     * Copy selection to clipboard
+     */
+    copySelection() {
+      if (!this.selection) return false
+
+      const track = this.tracks.find(t => t.id === this.selection.trackId)
+      if (!track || !track.buffer) return false
+
+      const { startTime, endTime } = this.selection
+      const startSample = Math.floor(startTime * this.sampleRate)
+      const endSample = Math.floor(endTime * this.sampleRate)
+      const length = endSample - startSample
+
+      // Create new buffer with selected audio
+      const clipBuffer = this.engine.audioContext.createBuffer(
+        track.buffer.numberOfChannels,
+        length,
+        this.sampleRate
+      )
+
+      for (let ch = 0; ch < track.buffer.numberOfChannels; ch++) {
+        const channelData = track.buffer.getChannelData(ch)
+        const clipData = clipBuffer.getChannelData(ch)
+        clipData.set(channelData.slice(startSample, endSample))
+      }
+
+      this.clipboard = {
+        buffer: clipBuffer,
+        duration: endTime - startTime
+      }
+
+      return true
+    },
+
+    /**
+     * Cut selection (copy + delete)
+     */
+    cutSelection() {
+      if (!this.copySelection()) return false
+      return this.deleteSelection(this.selection.trackId, this.selection)
+    },
+
+    /**
+     * Delete selection
+     */
+    deleteSelection(trackId, selection) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track || !track.buffer || !selection) return false
+
+      const { startTime, endTime } = selection
+      const startSample = Math.floor(startTime * this.sampleRate)
+      const endSample = Math.floor(endTime * this.sampleRate)
+
+      const originalLength = track.buffer.length
+      const newLength = originalLength - (endSample - startSample)
+
+      // Create new buffer without the deleted section
+      const newBuffer = this.engine.audioContext.createBuffer(
+        track.buffer.numberOfChannels,
+        newLength,
+        this.sampleRate
+      )
+
+      for (let ch = 0; ch < track.buffer.numberOfChannels; ch++) {
+        const originalData = track.buffer.getChannelData(ch)
+        const newData = newBuffer.getChannelData(ch)
+
+        // Copy before selection
+        newData.set(originalData.slice(0, startSample), 0)
+        // Copy after selection
+        newData.set(originalData.slice(endSample), startSample)
+      }
+
+      track.buffer = newBuffer
+      track.duration = newBuffer.duration
+      this.engine.setTrackBuffer(trackId, newBuffer)
+      track.waveformData = this.generateWaveformData(newBuffer)
+      this.updateDuration()
+      this.clearSelection()
+
+      return true
+    },
+
+    /**
+     * Paste clipboard at current position
+     */
+    pasteAtPosition(trackId, clipboardBuffer, position) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track || !track.buffer || !clipboardBuffer) return false
+
+      const positionSample = Math.floor(position * this.sampleRate)
+      const clipLength = clipboardBuffer.length
+      const newLength = track.buffer.length + clipLength
+
+      // Create new buffer with pasted audio
+      const newBuffer = this.engine.audioContext.createBuffer(
+        track.buffer.numberOfChannels,
+        newLength,
+        this.sampleRate
+      )
+
+      for (let ch = 0; ch < track.buffer.numberOfChannels; ch++) {
+        const originalData = track.buffer.getChannelData(ch)
+        const clipData = clipboardBuffer.getChannelData(ch % clipboardBuffer.numberOfChannels)
+        const newData = newBuffer.getChannelData(ch)
+
+        // Copy before paste position
+        newData.set(originalData.slice(0, positionSample), 0)
+        // Copy clipboard
+        newData.set(clipData, positionSample)
+        // Copy after paste position
+        newData.set(originalData.slice(positionSample), positionSample + clipLength)
+      }
+
+      track.buffer = newBuffer
+      track.duration = newBuffer.duration
+      this.engine.setTrackBuffer(trackId, newBuffer)
+      track.waveformData = this.generateWaveformData(newBuffer)
+      this.updateDuration()
+
+      return true
+    },
+
+    /**
+     * Apply effect to track (with selection support)
+     */
+    async applyEffectToTrack(trackId, effectName, params, selection = null) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track || !track.buffer) return
+
+      try {
+        let channelData = track.buffer.getChannelData(0)
+        let startSample = 0
+        let endSample = channelData.length
+
+        // If selection, only process selected region
+        if (selection) {
+          startSample = Math.floor(selection.startTime * this.sampleRate)
+          endSample = Math.floor(selection.endTime * this.sampleRate)
+        }
+
+        const selectedData = channelData.slice(startSample, endSample)
+        let processedData
+
+        // Apply effect using WASM bridge
+        switch (effectName) {
+          case 'amplify':
+            processedData = this.wasmBridge.amplify(selectedData, params.factor)
+            break
+          case 'normalize':
+            processedData = this.wasmBridge.normalize(selectedData, params.targetPeak)
+            break
+          case 'fadeIn':
+            processedData = this.wasmBridge.fadeIn(selectedData, params.samples)
+            break
+          case 'fadeOut':
+            processedData = this.wasmBridge.fadeOut(selectedData, params.samples)
+            break
+          case 'reverse':
+            processedData = this.wasmBridge.reverse(selectedData)
+            break
+          case 'lowPass':
+            processedData = this.wasmBridge.lowPassFilter(selectedData, params.cutoff)
+            break
+          case 'highPass':
+            processedData = this.wasmBridge.highPassFilter(selectedData, params.cutoff)
+            break
+          case 'compress':
+            processedData = this.wasmBridge.compress(
+              selectedData,
+              params.threshold,
+              params.ratio,
+              params.attack,
+              params.release
+            )
+            break
+          default:
+            console.warn('Unknown effect:', effectName)
+            return
+        }
+
+        // Create new buffer with processed data
+        const newBuffer = this.engine.audioContext.createBuffer(
+          track.buffer.numberOfChannels,
+          track.buffer.length,
+          track.buffer.sampleRate
+        )
+
+        // Copy processed data to new buffer
+        const newChannelData = newBuffer.getChannelData(0)
+        newChannelData.set(track.buffer.getChannelData(0))
+        newChannelData.set(processedData, startSample)
+
+        // If stereo, copy/process other channels
+        for (let i = 1; i < track.buffer.numberOfChannels; i++) {
+          newBuffer.getChannelData(i).set(track.buffer.getChannelData(i))
+        }
+
+        // Update track
+        track.buffer = newBuffer
+        this.engine.setTrackBuffer(trackId, newBuffer)
+        track.waveformData = this.generateWaveformData(newBuffer)
+
+        console.log(`Applied ${effectName} to track ${trackId}${selection ? ' (selection)' : ''}`)
+      } catch (error) {
+        console.error('Failed to apply effect:', error)
+        throw error
+      }
+    },
+
+    /**
      * Reset project
      */
     reset() {
       this.stop()
       this.tracks = []
       this.selectedTrackId = null
+      this.selection = null
+      this.clipboard = null
       this.currentTime = 0
       this.duration = 0
       this.projectName = 'Untitled Project'
