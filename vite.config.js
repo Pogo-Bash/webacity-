@@ -11,6 +11,11 @@ export default defineConfig({
   preview: {
     host: '0.0.0.0',
     port: parseInt(process.env.PORT) || 4173,
+    allowedHosts: [
+      '.onrender.com',
+      'localhost',
+      '127.0.0.1'
+    ]
   },
   build: {
     rollupOptions: {
