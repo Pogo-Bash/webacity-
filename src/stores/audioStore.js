@@ -638,17 +638,66 @@ export const useAudioStore = defineStore('audio', {
           clip.buffer.sampleRate
         )
 
-        // Copy processed data to new buffer
+        // Copy processed data to first channel
         newBuffer.getChannelData(0).set(processedData)
 
-        // If stereo, copy/process other channels
+        // If stereo, process other channels with the same effect
         for (let i = 1; i < clip.buffer.numberOfChannels; i++) {
-          newBuffer.getChannelData(i).set(clip.buffer.getChannelData(i))
+          const channelData = clip.buffer.getChannelData(i)
+          let processedChannelData
+
+          // Apply the same effect to other channels
+          switch (effectName) {
+            case 'amplify':
+              processedChannelData = this.wasmBridge.amplify(channelData, params.factor)
+              break
+            case 'normalize':
+              processedChannelData = this.wasmBridge.normalize(channelData, params.targetPeak)
+              break
+            case 'fadeIn':
+              processedChannelData = this.wasmBridge.fadeIn(channelData, params.samples)
+              break
+            case 'fadeOut':
+              processedChannelData = this.wasmBridge.fadeOut(channelData, params.samples)
+              break
+            case 'reverse':
+              processedChannelData = this.wasmBridge.reverse(channelData)
+              break
+            case 'lowPass':
+              processedChannelData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
+              break
+            case 'highPass':
+              processedChannelData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
+              break
+            case 'compress':
+              processedChannelData = this.wasmBridge.compress(
+                channelData,
+                params.threshold,
+                params.ratio,
+                params.attack,
+                params.release
+              )
+              break
+            default:
+              processedChannelData = channelData
+          }
+
+          newBuffer.getChannelData(i).set(processedChannelData)
         }
 
-        // Update clip
-        clip.buffer = newBuffer
-        clip.waveformData = this.generateWaveformData(newBuffer)
+        // Find the clip index in the track
+        const clipIndex = track.clips.findIndex(c => c.id === this.selectedClipId)
+        if (clipIndex === -1) return false
+
+        // Create a new clip object with updated buffer and waveform (to trigger Vue reactivity)
+        const updatedClip = {
+          ...clip,
+          buffer: newBuffer,
+          waveformData: this.generateWaveformData(newBuffer)
+        }
+
+        // Replace the clip in the array (this triggers Vue reactivity)
+        track.clips.splice(clipIndex, 1, updatedClip)
 
         // Rebuild track buffer from all clips
         this.updateTrackBufferFromClips(trackId)

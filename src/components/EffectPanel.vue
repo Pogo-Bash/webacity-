@@ -14,8 +14,16 @@
     </div>
 
     <div v-else class="p-4 space-y-4">
-      <div class="text-sm text-gray-400 mb-4">
-        Track: <span class="text-white">{{ selectedTrack.name }}</span>
+      <div class="text-sm mb-4">
+        <div class="text-gray-400">
+          Track: <span class="text-white">{{ selectedTrack.name }}</span>
+        </div>
+        <div v-if="audioStore.selectedClipId" class="text-blue-400 mt-1">
+          Selected Clip: <span class="text-white">{{ selectedClipName }}</span>
+        </div>
+        <div v-else class="text-gray-500 mt-1 text-xs">
+          Click a clip to apply effects to it specifically
+        </div>
       </div>
 
       <!-- Amplify -->
@@ -203,6 +211,13 @@ defineEmits(['close'])
 const audioStore = useAudioStore()
 const historyStore = useHistoryStore()
 const { selectedTrack, selection } = storeToRefs(audioStore)
+
+// Get selected clip name
+const selectedClipName = computed(() => {
+  if (!audioStore.selectedClipId) return ''
+  const clipData = audioStore.selectedClip
+  return clipData?.clip?.name || 'Unknown'
+})
 
 // Effect parameters
 const amplifyFactor = ref(2)

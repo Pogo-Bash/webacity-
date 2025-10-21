@@ -174,9 +174,21 @@ function onDragEnd(event) {
 }
 
 // Watch for changes that require redraw
-watch(() => [props.clip.waveformData, props.clip.startTime, props.clip.duration, props.projectDuration], () => {
-  setTimeout(() => drawWaveform(), 0)
-}, { deep: true })
+watch(
+  () => props.clip,
+  () => {
+    setTimeout(() => drawWaveform(), 0)
+  },
+  { deep: true }
+)
+
+// Also watch project duration separately as it affects positioning
+watch(
+  () => props.projectDuration,
+  () => {
+    setTimeout(() => drawWaveform(), 0)
+  }
+)
 
 onMounted(() => {
   // Delay initial draw to ensure element is sized
