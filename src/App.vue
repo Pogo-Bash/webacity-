@@ -1,5 +1,12 @@
 <template>
-  <div class="app-container h-screen w-screen flex flex-col bg-darker text-gray-100">
+  <div class="app-container h-screen w-screen flex flex-col bg-darker text-gray-100 relative">
+    <!-- Global Playhead Overlay -->
+    <div
+      v-if="tracks.length > 0 && audioStore.duration > 0"
+      class="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-50"
+      :style="{ left: playheadPosition + 'px' }"
+    ></div>
+
     <!-- Header -->
     <header class="bg-gray-900 border-b border-gray-700 px-6 py-3">
       <div class="flex items-center justify-between">
@@ -21,7 +28,7 @@
     />
 
     <!-- Timeline -->
-    <Timeline />
+    <Timeline ref="timeline" />
 
     <!-- Main Content Area -->
     <main class="flex-1 overflow-y-auto p-4 relative" ref="mainContent">
@@ -120,11 +127,25 @@ const historyStore = useHistoryStore()
 const { tracks, selectedTrack } = storeToRefs(audioStore)
 
 const mainContent = ref(null)
+const timeline = ref(null)
 
 const showEffects = ref(false)
 const showGenerator = ref(false)
 const showSettings = ref(false)
 const fileInput = ref(null)
+
+// Calculate playhead position for global overlay
+const playheadPosition = computed(() => {
+  if (!timeline.value || !audioStore.duration) return 0
+
+  // Get the timeline ruler element from the Timeline component
+  const timelineEl = timeline.value.$el?.querySelector('.timeline-container')
+  if (!timelineEl) return 0
+
+  const rect = timelineEl.getBoundingClientRect()
+  const ratio = audioStore.currentTime / audioStore.duration
+  return rect.left + (rect.width * ratio)
+})
 
 onMounted(async () => {
   // Initialize audio engine
