@@ -2,6 +2,14 @@
   <div class="track-container mb-4">
     <!-- Track Header -->
     <div class="flex items-center gap-2 p-3 bg-gray-800 border-b border-gray-700">
+      <!-- Selection Checkbox -->
+      <input
+        type="checkbox"
+        v-model="track.selected"
+        class="w-4 h-4 rounded border-gray-600 bg-gray-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer"
+        title="Select for slicing"
+      />
+
       <div class="flex-1">
         <input
           v-model="track.name"

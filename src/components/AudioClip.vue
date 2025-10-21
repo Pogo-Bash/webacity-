@@ -1,7 +1,10 @@
 <template>
   <div
     ref="clipElement"
-    class="absolute top-0 h-full cursor-move border border-gray-600 rounded overflow-hidden"
+    class="absolute top-0 h-full cursor-move rounded overflow-hidden"
+    :class="[
+      isSelected ? 'ring-2 ring-blue-400 border border-blue-400' : 'border border-gray-600',
+    ]"
     :style="{
       left: clipPosition + 'px',
       width: clipWidth + 'px',
@@ -9,6 +12,7 @@
     }"
     :title="clip.name"
     draggable="true"
+    @click.stop="selectClip"
     @dragstart="onDragStart"
     @dragend="onDragEnd"
   >
@@ -80,6 +84,11 @@ const clipWidth = computed(() => {
   return (props.clip.duration / props.projectDuration) * containerWidth
 })
 
+// Check if this clip is selected
+const isSelected = computed(() => {
+  return audioStore.selectedClipId === props.clip.id
+})
+
 // Check if this clip overlaps with others
 const hasOverlap = computed(() => {
   const track = audioStore.tracks.find(t => t.id === props.trackId)
@@ -98,6 +107,12 @@ const hasOverlap = computed(() => {
     )
   })
 })
+
+// Select this clip
+function selectClip() {
+  audioStore.selectedClipId = props.clip.id
+  audioStore.selectedTrackId = props.trackId
+}
 
 // Draw waveform
 function drawWaveform() {

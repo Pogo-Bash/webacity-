@@ -16,8 +16,9 @@ export const useAudioStore = defineStore('audio', {
     analyzer: null,
     tracks: [],
     selectedTrackId: null,
+    selectedClipId: null, // Currently selected clip for copy/paste operations
     selection: null, // { trackId, startTime, endTime }
-    clipboard: null, // { buffer, duration }
+    clipboard: null, // { buffer, duration, startTime } for clips
     snippets: [], // { id, name, buffer, duration, waveformData }
     isPlaying: false,
     isRecording: false,
@@ -38,6 +39,15 @@ export const useAudioStore = defineStore('audio', {
       return state.tracks.find(t => t.id === state.selectedTrackId)
     },
 
+    selectedClip: (state) => {
+      if (!state.selectedClipId) return null
+      for (const track of state.tracks) {
+        const clip = track.clips.find(c => c.id === state.selectedClipId)
+        if (clip) return { clip, trackId: track.id }
+      }
+      return null
+    },
+
     trackCount: (state) => state.tracks.length,
 
     hasAudio: (state) => state.tracks.some(t => t.buffer !== null),
@@ -48,13 +58,13 @@ export const useAudioStore = defineStore('audio', {
 
     hasSelection: (state) => state.selection !== null,
 
-    canCut: (state) => state.selection !== null,
+    canCut: (state) => state.selectedClipId !== null,
 
-    canCopy: (state) => state.selection !== null,
+    canCopy: (state) => state.selectedClipId !== null,
 
     canPaste: (state) => state.clipboard !== null && state.selectedTrackId !== null,
 
-    canDelete: (state) => state.selection !== null
+    canDelete: (state) => state.selectedClipId !== null
   },
 
   actions: {
@@ -106,6 +116,7 @@ export const useAudioStore = defineStore('audio', {
         pan: 0,
         muted: false,
         solo: false,
+        selected: false, // For slice selection
         waveformData: null,
         color: this.getRandomTrackColor(),
         clips: [] // Array of audio clips: { id, buffer, startTime, duration, waveformData, color }
@@ -334,7 +345,79 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Copy selection to clipboard
+     * Copy selected clip to clipboard
+     */
+    copyClip() {
+      if (!this.selectedClipId) return false
+
+      const clipData = this.selectedClip
+      if (!clipData) return false
+
+      const { clip, trackId } = clipData
+
+      // Copy clip data to clipboard
+      this.clipboard = {
+        buffer: clip.buffer,
+        duration: clip.duration,
+        startTime: 0 // Will be pasted at cursor position
+      }
+
+      console.log(`Copied clip "${clip.name}" to clipboard`)
+      return true
+    },
+
+    /**
+     * Cut selected clip (copy + delete)
+     */
+    cutClip() {
+      if (!this.copyClip()) return false
+
+      const clipData = this.selectedClip
+      if (!clipData) return false
+
+      const { trackId } = clipData
+      return this.removeClip(trackId, this.selectedClipId)
+    },
+
+    /**
+     * Paste clipboard as new clip at current time on selected track
+     */
+    pasteClip() {
+      if (!this.clipboard || !this.selectedTrackId) return false
+
+      const position = this.currentTime
+      const clip = this.addClipToTrack(this.selectedTrackId, this.clipboard.buffer, position, 'Pasted Clip')
+
+      if (clip) {
+        this.selectedClipId = clip.id
+        console.log(`Pasted clip at ${position.toFixed(2)}s`)
+        return true
+      }
+
+      return false
+    },
+
+    /**
+     * Delete selected clip
+     */
+    deleteClip() {
+      if (!this.selectedClipId) return false
+
+      const clipData = this.selectedClip
+      if (!clipData) return false
+
+      const { trackId } = clipData
+      const success = this.removeClip(trackId, this.selectedClipId)
+
+      if (success) {
+        this.selectedClipId = null
+      }
+
+      return success
+    },
+
+    /**
+     * Copy selection to clipboard (LEGACY - for backward compatibility)
      */
     copySelection() {
       if (!this.selection) return false
@@ -369,7 +452,7 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Cut selection (copy + delete)
+     * Cut selection (copy + delete) (LEGACY)
      */
     cutSelection() {
       if (!this.copySelection()) return false
@@ -377,7 +460,7 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Delete selection
+     * Delete selection (LEGACY)
      */
     deleteSelection(trackId, selection) {
       const track = this.tracks.find(t => t.id === trackId)
@@ -968,6 +1051,120 @@ export const useAudioStore = defineStore('audio', {
       return track.clips.filter(clip => {
         return time >= clip.startTime && time < clip.startTime + clip.duration
       })
+    },
+
+    /**
+     * Split clip at a specific time
+     */
+    splitClipAtTime(trackId, clipId, splitTime) {
+      const track = this.tracks.find(t => t.id === trackId)
+      if (!track) return false
+
+      const clipIndex = track.clips.findIndex(c => c.id === clipId)
+      if (clipIndex === -1) return false
+
+      const clip = track.clips[clipIndex]
+
+      // Check if split time is within the clip
+      const clipEndTime = clip.startTime + clip.duration
+      if (splitTime <= clip.startTime || splitTime >= clipEndTime) {
+        console.log('Split time is outside clip bounds')
+        return false
+      }
+
+      // Calculate the split point within the clip's buffer
+      const relativeTime = splitTime - clip.startTime
+      const sampleRate = clip.buffer.sampleRate
+      const splitSample = Math.floor(relativeTime * sampleRate)
+
+      // Create first part (clip start to split point)
+      const firstPartLength = splitSample
+      const firstBuffer = this.engine.audioContext.createBuffer(
+        clip.buffer.numberOfChannels,
+        firstPartLength,
+        sampleRate
+      )
+
+      // Create second part (split point to clip end)
+      const secondPartLength = clip.buffer.length - splitSample
+      const secondBuffer = this.engine.audioContext.createBuffer(
+        clip.buffer.numberOfChannels,
+        secondPartLength,
+        sampleRate
+      )
+
+      // Copy audio data
+      for (let channel = 0; channel < clip.buffer.numberOfChannels; channel++) {
+        const sourceData = clip.buffer.getChannelData(channel)
+        const firstData = firstBuffer.getChannelData(channel)
+        const secondData = secondBuffer.getChannelData(channel)
+
+        // Copy first part
+        for (let i = 0; i < firstPartLength; i++) {
+          firstData[i] = sourceData[i]
+        }
+
+        // Copy second part
+        for (let i = 0; i < secondPartLength; i++) {
+          secondData[i] = sourceData[splitSample + i]
+        }
+      }
+
+      // Update the original clip to be the first part
+      clip.buffer = firstBuffer
+      clip.duration = firstBuffer.duration
+      clip.waveformData = this.generateWaveformData(firstBuffer)
+
+      // Create new clip for the second part
+      const secondClip = {
+        id: `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        name: `${clip.name} (2)`,
+        buffer: secondBuffer,
+        startTime: splitTime,
+        duration: secondBuffer.duration,
+        waveformData: this.generateWaveformData(secondBuffer),
+        color: clip.color
+      }
+
+      // Insert the second clip right after the first one
+      track.clips.splice(clipIndex + 1, 0, secondClip)
+
+      // Rebuild the track buffer from all clips
+      this.updateTrackBufferFromClips(trackId)
+
+      console.log(`Split clip "${clip.name}" at ${splitTime.toFixed(2)}s`)
+      return true
+    },
+
+    /**
+     * Split all clips at a given time on selected tracks
+     */
+    sliceAtPlayhead(time) {
+      const selectedTracks = this.tracks.filter(t => t.selected)
+
+      if (selectedTracks.length === 0) {
+        console.log('No tracks selected for slicing')
+        return 0
+      }
+
+      let sliceCount = 0
+
+      for (const track of selectedTracks) {
+        // Find clips that contain this time
+        const clipsToSplit = track.clips.filter(clip => {
+          const clipEndTime = clip.startTime + clip.duration
+          return time > clip.startTime && time < clipEndTime
+        })
+
+        for (const clip of clipsToSplit) {
+          if (this.splitClipAtTime(track.id, clip.id, time)) {
+            sliceCount++
+          }
+        }
+      }
+
+      console.log(`Sliced ${sliceCount} clip(s) at ${time.toFixed(2)}s`)
+      return sliceCount
     },
 
     /**

@@ -17,7 +17,6 @@
     <Toolbar
       @toggle-effects="showEffects = !showEffects"
       @toggle-generator="showGenerator = !showGenerator"
-      @toggle-snippets="showSnippets = !showSnippets"
       @toggle-settings="showSettings = !showSettings"
     />
 
@@ -26,24 +25,6 @@
 
     <!-- Main Content Area -->
     <main class="flex-1 overflow-y-auto p-4 relative" ref="mainContent">
-      <!-- Global Playhead -->
-      <div
-        v-if="tracks.length > 0 && audioStore.duration > 0"
-        class="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none z-10"
-        :style="{ left: playheadPosition + 'px' }"
-      >
-        <!-- Scissor Icon at top -->
-        <div
-          class="absolute -top-1 -left-3 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center cursor-pointer pointer-events-auto"
-          @click="sliceAtPlayhead"
-          title="Click to slice audio at playhead position"
-        >
-          <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M9.64,7.64c.23-.5.36-1.05.36-1.64,0-2.21-1.79-4-4-4S2,3.79,2,6s1.79,4,4,4c.59,0,1.14-.13,1.64-.36L10,12l-2.36,2.36c-.5-.23-1.05-.36-1.64-.36-2.21,0-4,1.79-4,4s1.79,4,4,4s4-1.79,4-4c0-.59-.13-1.14-.36-1.64L12,14l7,7h3v-1L9.64,7.64z M6,8c-1.1,0-2-.89-2-2s.9-2,2-2s2,.89,2,2S7.1,8,6,8z M6,20c-1.1,0-2-.89-2-2s.9-2,2-2s2,.89,2,2S7.1,20,6,20z M12,12.5c-.28,0-.5-.22-.5-.5s.22-.5.5-.5s.5.22.5.5S12.28,12.5,12,12.5z M19,3l-6,6l2,2l7-7V3H19z"/>
-          </svg>
-        </div>
-      </div>
-
       <!-- Tracks -->
       <div v-if="tracks.length > 0" class="space-y-4">
         <Track
@@ -86,9 +67,6 @@
 
     <!-- Generator Panel -->
     <GeneratorPanel :visible="showGenerator" @close="showGenerator = false" />
-
-    <!-- Snippet Panel -->
-    <SnippetPanel :visible="showSnippets" @close="showSnippets = false" />
 
     <!-- Settings Panel -->
     <SettingsPanel :visible="showSettings" @close="showSettings = false" />
@@ -135,7 +113,6 @@ import Timeline from './components/Timeline.vue'
 import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
 import GeneratorPanel from './components/GeneratorPanel.vue'
-import SnippetPanel from './components/SnippetPanel.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
 const audioStore = useAudioStore()
@@ -146,16 +123,8 @@ const mainContent = ref(null)
 
 const showEffects = ref(false)
 const showGenerator = ref(false)
-const showSnippets = ref(false)
 const showSettings = ref(false)
 const fileInput = ref(null)
-
-const playheadPosition = computed(() => {
-  if (!mainContent.value || !audioStore.duration) return 0
-  const contentWidth = mainContent.value.offsetWidth
-  const padding = 16 // Account for p-4 padding (1rem = 16px)
-  return (audioStore.currentTime / audioStore.duration) * (contentWidth - padding * 2) + padding
-})
 
 onMounted(async () => {
   // Initialize audio engine
@@ -209,12 +178,8 @@ function handleKeyDown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'x') {
     e.preventDefault()
     if (audioStore.canCut) {
-      const command = new DeleteSelectionCommand(audioStore, audioStore.selection.trackId, audioStore.selection)
-      // Copy first, then delete with undo support
-      if (audioStore.copySelection()) {
-        historyStore.execute(command)
-        console.log('Cut selection')
-      }
+      audioStore.cutClip()
+      console.log('Cut clip')
     }
   }
 
@@ -222,21 +187,17 @@ function handleKeyDown(e) {
   if ((e.ctrlKey || e.metaKey) && e.key === 'c') {
     e.preventDefault()
     if (audioStore.canCopy) {
-      audioStore.copySelection()
-      console.log('Copied selection')
+      audioStore.copyClip()
+      console.log('Copied clip')
     }
   }
 
   // Ctrl/Cmd + V: Paste
   if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
     e.preventDefault()
-    if (audioStore.canPaste && audioStore.clipboard) {
-      audioStore.pasteAtPosition(
-        audioStore.selectedTrackId,
-        audioStore.clipboard.buffer,
-        audioStore.currentTime
-      )
-      console.log('Pasted at', audioStore.currentTime)
+    if (audioStore.canPaste) {
+      audioStore.pasteClip()
+      console.log('Pasted clip')
     }
   }
 
@@ -256,16 +217,11 @@ function handleKeyDown(e) {
     console.log('Selection cleared')
   }
 
-  // Delete or Backspace: Delete selection
-  if ((e.key === 'Delete' || e.key === 'Backspace') && audioStore.hasSelection) {
+  // Delete or Backspace: Delete clip
+  if ((e.key === 'Delete' || e.key === 'Backspace') && audioStore.selectedClipId) {
     e.preventDefault()
-    const command = new DeleteSelectionCommand(
-      audioStore,
-      audioStore.selection.trackId,
-      audioStore.selection
-    )
-    historyStore.execute(command)
-    console.log('Deleted selection')
+    audioStore.deleteClip()
+    console.log('Deleted clip')
   }
 
   // Ctrl/Cmd + I: Import
@@ -324,75 +280,17 @@ function addTrack() {
 }
 
 function sliceAtPlayhead() {
-  if (!selectedTrack.value || !selectedTrack.value.buffer) {
-    console.log('No track selected or track is empty')
-    return
-  }
-
   const sliceTime = audioStore.currentTime
-  if (sliceTime <= 0 || sliceTime >= selectedTrack.value.duration) {
+  if (sliceTime <= 0) {
     console.log('Invalid slice position')
     return
   }
 
-  // Create a selection at the slice point and use the split functionality
-  // For now, we'll create two separate tracks from the split
-  const track = selectedTrack.value
-  const buffer = track.buffer
-  const sampleRate = buffer.sampleRate
-  const sliceSample = Math.floor(sliceTime * sampleRate)
+  const sliceCount = audioStore.sliceAtPlayhead(sliceTime)
 
-  // Create first part (0 to sliceTime)
-  const firstPartLength = sliceSample
-  const firstBuffer = audioStore.engine.audioContext.createBuffer(
-    buffer.numberOfChannels,
-    firstPartLength,
-    sampleRate
-  )
-
-  // Create second part (sliceTime to end)
-  const secondPartLength = buffer.length - sliceSample
-  const secondBuffer = audioStore.engine.audioContext.createBuffer(
-    buffer.numberOfChannels,
-    secondPartLength,
-    sampleRate
-  )
-
-  // Copy audio data
-  for (let channel = 0; channel < buffer.numberOfChannels; channel++) {
-    const sourceData = buffer.getChannelData(channel)
-    const firstData = firstBuffer.getChannelData(channel)
-    const secondData = secondBuffer.getChannelData(channel)
-
-    // Copy first part
-    for (let i = 0; i < firstPartLength; i++) {
-      firstData[i] = sourceData[i]
-    }
-
-    // Copy second part
-    for (let i = 0; i < secondPartLength; i++) {
-      secondData[i] = sourceData[sliceSample + i]
-    }
+  if (sliceCount === 0) {
+    console.log('No tracks selected for slicing or no clips at playhead position')
   }
-
-  // Update the current track with the first part
-  track.buffer = firstBuffer
-  track.duration = firstBuffer.duration
-  track.waveformData = audioStore.generateWaveformData(firstBuffer)
-  audioStore.engine.setTrackBuffer(track.id, firstBuffer)
-
-  // Create a new track for the second part
-  const newTrack = audioStore.addTrack(`${track.name} (split)`)
-  const newTrackObj = audioStore.tracks.find(t => t.id === newTrack.id)
-  if (newTrackObj) {
-    newTrackObj.buffer = secondBuffer
-    newTrackObj.duration = secondBuffer.duration
-    newTrackObj.waveformData = audioStore.generateWaveformData(secondBuffer)
-    audioStore.engine.setTrackBuffer(newTrack.id, secondBuffer)
-  }
-
-  audioStore.updateDuration()
-  console.log(`Sliced track at ${sliceTime.toFixed(2)}s into two tracks`)
 }
 </script>
 

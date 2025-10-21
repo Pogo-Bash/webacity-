@@ -13,11 +13,19 @@
 
       <!-- Playhead -->
       <div
-        class="absolute top-0 bottom-0 w-0.5 bg-red-500"
-        :class="{ 'cursor-grab': !isDragging, 'cursor-grabbing': isDragging }"
+        class="absolute top-0 bottom-0 w-0.5 bg-red-500 pointer-events-none"
         :style="{ left: playheadPosition + 'px' }"
       >
-        <div class="w-3 h-3 bg-red-500 transform -translate-x-1/2 relative top-0" style="clip-path: polygon(50% 0%, 0% 100%, 100% 100%)"></div>
+        <!-- Scissor Icon at top -->
+        <div
+          class="absolute -top-1 -left-3 w-6 h-6 bg-red-500 rounded-full flex items-center justify-center cursor-pointer pointer-events-auto hover:bg-red-600 transition-colors"
+          @click="sliceAtPlayhead"
+          title="Click to slice audio at playhead position"
+        >
+          <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M9.64,7.64c.23-.5.36-1.05.36-1.64,0-2.21-1.79-4-4-4S2,3.79,2,6s1.79,4,4,4c.59,0,1.14-.13,1.64-.36L10,12l-2.36,2.36c-.5-.23-1.05-.36-1.64-.36-2.21,0-4,1.79-4,4s1.79,4,4,4s4-1.79,4-4c0-.59-.13-1.14-.36-1.64L12,14l7,7h3v-1L9.64,7.64z M6,8c-1.1,0-2-.89-2-2s.9-2,2-2s2,.89,2,2S7.1,8,6,8z M6,20c-1.1,0-2-.89-2-2s.9-2,2-2s2,.89,2,2S7.1,20,6,20z M12,12.5c-.28,0-.5-.22-.5-.5s.22-.5.5-.5s.5.22.5.5S12.28,12.5,12,12.5z M19,3l-6,6l2,2l7-7V3H19z"/>
+          </svg>
+        </div>
       </div>
     </div>
 
@@ -163,6 +171,20 @@ function formatTime(seconds) {
   const secs = Math.floor(seconds % 60)
   const ms = Math.floor((seconds % 1) * 10)
   return `${mins}:${secs.toString().padStart(2, '0')}.${ms}`
+}
+
+function sliceAtPlayhead() {
+  const sliceTime = audioStore.currentTime
+  if (sliceTime <= 0) {
+    console.log('Invalid slice position')
+    return
+  }
+
+  const sliceCount = audioStore.sliceAtPlayhead(sliceTime)
+
+  if (sliceCount === 0) {
+    console.log('No tracks selected for slicing or no clips at playhead position')
+  }
 }
 </script>
 
