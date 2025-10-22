@@ -364,14 +364,23 @@ export class StemSeparator {
    * Compute Short-Time Fourier Transform (STFT)
    */
   async computeSpectrogram(audio, sampleRate) {
-    return tf.tidy(() => {
-      const { fftSize, hopLength } = this.modelConfig
+    const { fftSize, hopLength } = this.modelConfig
 
+    // Validate input
+    if (!audio || audio.length < fftSize) {
+      throw new Error(`Audio too short. Minimum length is ${fftSize} samples (${(fftSize / sampleRate).toFixed(2)}s)`)
+    }
+
+    return tf.tidy(() => {
       // Convert audio to tensor
       const audioTensor = tf.tensor1d(audio)
 
       // Calculate number of frames
       const numFrames = Math.floor((audio.length - fftSize) / hopLength) + 1
+
+      if (numFrames <= 0) {
+        throw new Error('Unable to compute spectrogram: insufficient audio length')
+      }
 
       // Initialize spectrogram
       const spectrogramData = []
@@ -388,14 +397,15 @@ export class StemSeparator {
         const fft = tf.spectral.rfft(windowedFrame)
         spectrogramData.push(fft)
 
+        // Cleanup intermediate tensors
         windowTensor.dispose()
+        windowedFrame.dispose()
       }
 
       // Stack all frames [freq_bins, num_frames]
       const spectrogram = tf.stack(spectrogramData, 1)
 
       // Cleanup
-      audioTensor.dispose()
       spectrogramData.forEach(s => s.dispose())
 
       return spectrogram
@@ -406,59 +416,71 @@ export class StemSeparator {
    * Convert spectrogram back to audio using inverse STFT
    */
   async spectrogramToAudio(spectrogram, sampleRate, numChannels) {
-    return tf.tidy(() => {
-      const { fftSize, hopLength } = this.modelConfig
+    // Don't use tf.tidy() here because we're creating AudioBuffer (not a tensor)
+    const { fftSize, hopLength } = this.modelConfig
 
-      const numFrames = spectrogram.shape[1]
-      const audioLength = (numFrames - 1) * hopLength + fftSize
+    // Validate spectrogram shape
+    if (!spectrogram.shape || spectrogram.shape.length !== 2) {
+      throw new Error('Invalid spectrogram shape')
+    }
 
-      // Initialize output audio
-      const output = tf.buffer([audioLength])
-      const windowSum = tf.buffer([audioLength])
+    const numFrames = spectrogram.shape[1]
+    if (numFrames <= 0) {
+      throw new Error('Invalid number of frames')
+    }
 
-      // Inverse FFT for each frame
-      for (let i = 0; i < numFrames; i++) {
-        const frame = spectrogram.slice([0, i], [-1, 1]).squeeze()
+    const audioLength = (numFrames - 1) * hopLength + fftSize
+    if (audioLength <= 0 || !isFinite(audioLength)) {
+      throw new Error(`Invalid audio length: ${audioLength}`)
+    }
 
-        // Inverse FFT
-        const ifft = tf.spectral.irfft(frame)
+    // Initialize output audio
+    const audioArray = new Float32Array(audioLength)
+    const windowSumArray = new Float32Array(audioLength)
 
-        // Apply window
-        const windowTensor = tf.tensor1d(this.window)
-        const windowedFrame = tf.mul(ifft, windowTensor)
+    // Inverse FFT for each frame
+    for (let i = 0; i < numFrames; i++) {
+      const frame = spectrogram.slice([0, i], [-1, 1]).squeeze()
 
-        // Overlap-add
-        const start = i * hopLength
-        const frameData = windowedFrame.dataSync()
-        const windowData = windowTensor.dataSync()
+      // Inverse FFT
+      const ifft = tf.spectral.irfft(frame)
+      const windowTensor = tf.tensor1d(this.window)
+      const windowedFrame = tf.mul(ifft, windowTensor)
 
-        for (let j = 0; j < fftSize && start + j < audioLength; j++) {
-          output.set(output.get(start + j) + frameData[j], start + j)
-          windowSum.set(windowSum.get(start + j) + windowData[j], start + j)
-        }
+      // Get data synchronously
+      const frameData = windowedFrame.dataSync()
+      const windowData = windowTensor.dataSync()
 
-        windowTensor.dispose()
-        ifft.dispose()
+      // Overlap-add
+      const start = i * hopLength
+      for (let j = 0; j < fftSize && start + j < audioLength; j++) {
+        audioArray[start + j] += frameData[j]
+        windowSumArray[start + j] += windowData[j]
       }
 
-      // Normalize by window sum
-      const audioArray = new Float32Array(audioLength)
-      for (let i = 0; i < audioLength; i++) {
-        const sum = windowSum.get(i)
-        audioArray[i] = sum > 1e-8 ? output.get(i) / sum : 0
-      }
+      // Clean up tensors
+      frame.dispose()
+      ifft.dispose()
+      windowTensor.dispose()
+      windowedFrame.dispose()
+    }
 
-      // Create AudioBuffer
-      const audioContext = new AudioContext({ sampleRate })
-      const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
+    // Normalize by window sum
+    for (let i = 0; i < audioLength; i++) {
+      const sum = windowSumArray[i]
+      audioArray[i] = sum > 1e-8 ? audioArray[i] / sum : 0
+    }
 
-      // Fill channels
-      for (let ch = 0; ch < numChannels; ch++) {
-        audioBuffer.copyToChannel(audioArray, ch)
-      }
+    // Create AudioBuffer
+    const audioContext = new AudioContext({ sampleRate })
+    const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
 
-      return audioBuffer
-    })
+    // Fill channels
+    for (let ch = 0; ch < numChannels; ch++) {
+      audioBuffer.copyToChannel(audioArray, ch)
+    }
+
+    return audioBuffer
   }
 
   /**
