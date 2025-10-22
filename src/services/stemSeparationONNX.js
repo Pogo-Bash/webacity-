@@ -1,11 +1,286 @@
 /**
- * ONNX-based Stem Separation Service
+ * ONNX-based Stem Separation Service with Adaptive Processing
  * Uses UVR MDX-NET models with ONNX Runtime Web
  * Uses TensorFlow.js for fast STFT/ISTFT processing
+ *
+ * ADAPTIVE SYSTEM:
+ * - Detects device capabilities (CPU, RAM, GPU)
+ * - Dynamically adjusts processing parameters
+ * - Works on devices from Chromebooks to high-end desktops
+ * - 100% local processing (no server uploads)
  */
 
 import * as ort from 'onnxruntime-web'
 import * as tf from '@tensorflow/tfjs'
+
+/**
+ * Device Profiler - Detects hardware capabilities
+ */
+class DeviceProfiler {
+  async profileDevice() {
+    const profile = {
+      cpuCores: navigator.hardwareConcurrency || 2,
+      totalMemoryGB: navigator.deviceMemory || null,
+      gpu: await this.detectGPU(),
+      webGLSupport: this.checkWebGLSupport(),
+      browser: this.detectBrowser(),
+      platform: navigator.platform,
+      isMobile: /Android|iPhone|iPad/i.test(navigator.userAgent),
+      isChromebook: /CrOS/.test(navigator.userAgent),
+      benchmark: await this.runBenchmark()
+    }
+
+    return profile
+  }
+
+  async detectGPU() {
+    try {
+      const canvas = document.createElement('canvas')
+      const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl')
+
+      if (!gl) return { vendor: 'none', renderer: 'none', tier: 'none' }
+
+      const debugInfo = gl.getExtension('WEBGL_debug_renderer_info')
+      const vendor = debugInfo ? gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL) : 'unknown'
+      const renderer = debugInfo ? gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL) : 'unknown'
+
+      const tier = this.classifyGPU(renderer)
+
+      return { vendor, renderer, tier }
+    } catch (error) {
+      return { vendor: 'unknown', renderer: 'unknown', tier: 'low' }
+    }
+  }
+
+  classifyGPU(renderer) {
+    const rendererLower = renderer.toLowerCase()
+
+    if (/(nvidia|geforce|rtx|gtx|radeon|rx\s*[56789]|arc\s*[abc])/i.test(rendererLower)) {
+      return 'high'
+    }
+
+    if (/(intel.*iris|intel.*uhd|intel.*hd\s*[6789]|apple\s*m[123]|adreno\s*[6789])/i.test(rendererLower)) {
+      return 'medium'
+    }
+
+    return 'low'
+  }
+
+  checkWebGLSupport() {
+    try {
+      const canvas = document.createElement('canvas')
+      const gl = canvas.getContext('webgl2') ||
+                 canvas.getContext('webgl') ||
+                 canvas.getContext('experimental-webgl')
+
+      if (!gl) return { version: 0, supported: false }
+
+      const version = gl.getParameter(gl.VERSION)
+      const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE)
+
+      return {
+        version: version.includes('WebGL 2') ? 2 : 1,
+        supported: true,
+        maxTextureSize
+      }
+    } catch (error) {
+      return { version: 0, supported: false }
+    }
+  }
+
+  detectBrowser() {
+    const ua = navigator.userAgent
+    if (ua.includes('Chrome')) return 'Chrome'
+    if (ua.includes('Firefox')) return 'Firefox'
+    if (ua.includes('Safari') && !ua.includes('Chrome')) return 'Safari'
+    if (ua.includes('Edge')) return 'Edge'
+    return 'Unknown'
+  }
+
+  async runBenchmark() {
+    const startTime = performance.now()
+
+    try {
+      const testSize = 44100
+      const testData = new Float32Array(testSize)
+      for (let i = 0; i < testSize; i++) {
+        testData[i] = Math.sin(2 * Math.PI * 440 * i / 44100)
+      }
+
+      if (typeof tf !== 'undefined') {
+        await tf.ready()
+        const tensor = tf.tensor1d(testData)
+        const result = tf.abs(tensor)
+        await result.data()
+        tensor.dispose()
+        result.dispose()
+      }
+
+      const duration = performance.now() - startTime
+
+      if (duration < 50) return 'fast'
+      if (duration < 150) return 'medium'
+      return 'slow'
+
+    } catch (error) {
+      return 'slow'
+    }
+  }
+
+  async getAvailableMemory() {
+    if (performance.memory) {
+      const limit = performance.memory.jsHeapSizeLimit
+      const used = performance.memory.usedJSHeapSize
+      const available = limit - used
+
+      return {
+        limitMB: Math.round(limit / 1048576),
+        usedMB: Math.round(used / 1048576),
+        availableMB: Math.round(available / 1048576)
+      }
+    }
+
+    const estimatedGB = navigator.deviceMemory || 4
+    return {
+      limitMB: estimatedGB * 1024,
+      usedMB: 0,
+      availableMB: Math.round(estimatedGB * 1024 * 0.5)
+    }
+  }
+}
+
+/**
+ * Device Tier Classifier - Classifies devices into performance tiers
+ */
+class DeviceTierClassifier {
+  classifyDevice(profile) {
+    const score = this.calculateScore(profile)
+
+    if (score >= 80) return 'high'
+    if (score >= 50) return 'medium'
+    if (score >= 30) return 'low'
+    return 'minimal'
+  }
+
+  calculateScore(profile) {
+    let score = 0
+
+    const cpuScore = Math.min(profile.cpuCores * 5, 30)
+    score += cpuScore
+
+    const memoryGB = profile.totalMemoryGB || 4
+    const memoryScore = Math.min(memoryGB * 3.75, 30)
+    score += memoryScore
+
+    if (profile.gpu.tier === 'high') score += 25
+    else if (profile.gpu.tier === 'medium') score += 15
+    else if (profile.gpu.tier === 'low') score += 5
+
+    if (profile.benchmark === 'fast') score += 15
+    else if (profile.benchmark === 'medium') score += 10
+    else score += 5
+
+    return score
+  }
+
+  getDeviceName(tier) {
+    const names = {
+      high: 'High-End Desktop/Laptop',
+      medium: 'Mid-Range Laptop/Tablet',
+      low: 'Budget Laptop/Chromebook',
+      minimal: 'Low-End Chromebook/Old Device'
+    }
+    return names[tier] || 'Unknown Device'
+  }
+}
+
+/**
+ * Adaptive Configuration Generator - Creates optimal settings per device
+ */
+class AdaptiveConfigGenerator {
+  generateConfig(deviceTier, profile, audioDuration = 0) {
+    const configs = {
+      high: {
+        n_fft: 6144,
+        hop_length: 1024,
+        dim_f: 3073,
+        chunk_size: 441000,
+        overlap: 0.25,
+        backend: 'webgl',
+        fallbackBackends: ['wasm', 'cpu'],
+        memoryReserve: 200
+      },
+      medium: {
+        n_fft: 4096,
+        hop_length: 1024,
+        dim_f: 2049,
+        chunk_size: 220500,
+        overlap: 0.25,
+        backend: 'wasm',
+        fallbackBackends: ['cpu'],
+        memoryReserve: 150
+      },
+      low: {
+        n_fft: 2048,
+        hop_length: 512,
+        dim_f: 1025,
+        chunk_size: 88200,
+        overlap: 0.2,
+        backend: 'wasm',
+        fallbackBackends: ['cpu'],
+        memoryReserve: 100
+      },
+      minimal: {
+        n_fft: 2048,
+        hop_length: 512,
+        dim_f: 1025,
+        chunk_size: 44100,
+        overlap: 0.15,
+        backend: 'cpu',
+        fallbackBackends: [],
+        memoryReserve: 50
+      }
+    }
+
+    const config = configs[deviceTier]
+
+    if (profile.availableMB && profile.availableMB < 500) {
+      config.chunk_size = Math.min(config.chunk_size, 44100)
+      config.n_fft = 2048
+      config.dim_f = 1025
+    }
+
+    if (audioDuration > 300) {
+      config.chunk_size = Math.min(config.chunk_size, 220500)
+    }
+
+    return config
+  }
+
+  estimateProcessingTime(config, audioDuration, deviceTier) {
+    const baseMultipliers = {
+      high: 0.5,
+      medium: 2.0,
+      low: 5.0,
+      minimal: 10.0
+    }
+
+    const multiplier = baseMultipliers[deviceTier]
+    const estimatedSeconds = audioDuration * multiplier
+
+    return {
+      seconds: estimatedSeconds,
+      formatted: this.formatTime(estimatedSeconds)
+    }
+  }
+
+  formatTime(seconds) {
+    if (seconds < 60) return `${Math.round(seconds)} seconds`
+    const minutes = Math.floor(seconds / 60)
+    const secs = Math.round(seconds % 60)
+    return `${minutes}m ${secs}s`
+  }
+}
 
 export class ONNXStemSeparator {
   constructor() {
@@ -14,51 +289,83 @@ export class ONNXStemSeparator {
     this.initialized = false
     this.sampleRate = 44100
 
-    // MDX-NET model configuration
-    this.config = {
-      n_fft: 6144,
-      hop_length: 1024,
-      dim_f: 3073, // CRITICAL FIX: Must match n_fft/2 + 1 = 6144/2 + 1 = 3073
-      chunk_size: 485100, // ~11 seconds at 44.1kHz
-      overlap: 0.25
-    }
+    // Adaptive system components
+    this.profiler = new DeviceProfiler()
+    this.classifier = new DeviceTierClassifier()
+    this.configGenerator = new AdaptiveConfigGenerator()
 
-    // Validate frequency dimension consistency
-    const expectedFreqBins = Math.floor(this.config.n_fft / 2) + 1
-    if (expectedFreqBins !== this.config.dim_f) {
-      throw new Error(
-        `Configuration error: n_fft=${this.config.n_fft} produces ${expectedFreqBins} frequency bins, ` +
-        `but dim_f=${this.config.dim_f}. These must match to prevent phase reconstruction errors.`
-      )
-    }
+    // Device profile and adaptive configuration (set during initialize())
+    this.deviceProfile = null
+    this.deviceTier = null
+    this.config = null // Will be set adaptively per audio file
   }
 
   /**
-   * Initialize ONNX Runtime with WASM backend
+   * Initialize with device profiling and adaptive backend selection
    */
   async initialize(onProgress = null) {
     if (this.initialized) return true
 
     try {
+      // Step 1: Profile device capabilities
       if (onProgress) {
-        onProgress({ status: 'loading', message: 'Initializing ONNX Runtime...', progress: 10 })
+        onProgress({ status: 'profiling', message: 'Analyzing device capabilities...', progress: 5 })
       }
 
-      // Configure ONNX Runtime with WASM (stable, no shader issues)
-      ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4
+      this.deviceProfile = await this.profiler.profileDevice()
+      this.deviceProfile.availableMB = (await this.profiler.getAvailableMemory()).availableMB
+
+      // Step 2: Classify device tier
+      this.deviceTier = this.classifier.classifyDevice(this.deviceProfile)
+
+      console.log('📊 Device Profile:', {
+        tier: this.deviceTier,
+        name: this.classifier.getDeviceName(this.deviceTier),
+        cpu: `${this.deviceProfile.cpuCores} cores`,
+        memory: `${this.deviceProfile.totalMemoryGB || '?'}GB (${this.deviceProfile.availableMB}MB available)`,
+        gpu: `${this.deviceProfile.gpu.renderer} (${this.deviceProfile.gpu.tier})`,
+        benchmark: this.deviceProfile.benchmark,
+        isChromebook: this.deviceProfile.isChromebook
+      })
+
+      if (onProgress) {
+        onProgress({
+          status: 'profiling',
+          message: `Detected: ${this.classifier.getDeviceName(this.deviceTier)}`,
+          progress: 15
+        })
+      }
+
+      // Step 3: Configure ONNX Runtime based on device
+      if (onProgress) {
+        onProgress({ status: 'loading', message: 'Initializing ONNX Runtime...', progress: 20 })
+      }
+
+      ort.env.wasm.numThreads = Math.min(this.deviceProfile.cpuCores || 2, 4)
       ort.env.wasm.simd = true
       ort.env.wasm.proxy = false
 
-      // Initialize TensorFlow.js backend with fallback strategy
+      console.log(`✅ ONNX Runtime configured:`)
+      console.log(`   Threads: ${ort.env.wasm.numThreads}`)
+
+      // Step 4: Initialize TensorFlow.js with adaptive backend selection
       await tf.ready()
 
-      // CRITICAL FIX: Try multiple backends with fallback to handle WebGL shader errors
-      const backends = ['webgl', 'wasm', 'cpu']
+      const backendOrder = this.deviceTier === 'high'
+        ? ['webgl', 'wasm', 'cpu']
+        : this.deviceTier === 'minimal'
+        ? ['cpu', 'wasm']
+        : ['wasm', 'cpu']
+
       let backendSet = false
       let lastError = null
 
-      for (const backend of backends) {
+      for (const backend of backendOrder) {
         try {
+          if (onProgress) {
+            onProgress({ status: 'loading', message: `Trying ${backend} backend...`, progress: 25 })
+          }
+
           console.log(`🔄 Attempting to initialize TensorFlow.js with '${backend}' backend...`)
           const success = await tf.setBackend(backend)
 
@@ -71,7 +378,6 @@ export class ONNXStemSeparator {
         } catch (error) {
           console.warn(`⚠️  Failed to set '${backend}' backend:`, error.message)
           lastError = error
-          // Try next backend
           continue
         }
       }
@@ -82,18 +388,15 @@ export class ONNXStemSeparator {
         )
       }
 
-      console.log(`✅ ONNX Runtime initialized with WASM backend`)
-      console.log(`   ONNX Threads: ${ort.env.wasm.numThreads}`)
-
       if (onProgress) {
-        onProgress({ status: 'ready', message: 'ONNX Runtime ready', progress: 100 })
+        onProgress({ status: 'ready', message: 'Initialization complete', progress: 100 })
       }
 
       this.initialized = true
       return true
     } catch (error) {
-      console.error('❌ Failed to initialize ONNX Runtime:', error)
-      throw new Error(`ONNX initialization failed: ${error.message}`)
+      console.error('❌ Failed to initialize:', error)
+      throw new Error(`Initialization failed: ${error.message}`)
     }
   }
 
@@ -536,7 +839,7 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Main separation function
+   * Main separation function with adaptive processing
    */
   async separate(audioBuffer, onProgress = null) {
     if (!this.initialized) {
@@ -551,8 +854,37 @@ export class ONNXStemSeparator {
       const startTime = performance.now()
       console.log(`🎵 Separating ${audioBuffer.duration.toFixed(2)}s audio...`)
 
+      // ADAPTIVE CONFIGURATION: Generate config based on device tier and audio duration
+      this.config = this.configGenerator.generateConfig(
+        this.deviceTier,
+        this.deviceProfile,
+        audioBuffer.duration
+      )
+
+      console.log('⚙️  Adaptive Configuration:', {
+        tier: this.deviceTier,
+        n_fft: this.config.n_fft,
+        dim_f: this.config.dim_f,
+        chunk_size: `${this.config.chunk_size} samples (~${(this.config.chunk_size / 44100).toFixed(1)}s)`,
+        overlap: `${(this.config.overlap * 100).toFixed(0)}%`,
+        backend: tf.getBackend()
+      })
+
+      // Show estimated processing time
+      const timeEstimate = this.configGenerator.estimateProcessingTime(
+        this.config,
+        audioBuffer.duration,
+        this.deviceTier
+      )
+
+      console.log(`⏱️  Estimated processing time: ${timeEstimate.formatted}`)
+
       if (onProgress) {
-        onProgress({ status: 'preprocessing', message: 'Converting to mono...', progress: 10 })
+        onProgress({
+          status: 'preprocessing',
+          message: `Will take ~${timeEstimate.formatted}`,
+          progress: 10
+        })
       }
 
       // Convert to mono
@@ -593,6 +925,11 @@ export class ONNXStemSeparator {
             startSample: audioChunks[i].startSample
           })
 
+          // Memory cleanup for low-tier devices
+          if (this.deviceTier === 'low' || this.deviceTier === 'minimal') {
+            await this.cleanupMemory()
+          }
+
           if (onProgress) {
             const chunkProgress = 25 + (45 * (i + 1) / audioChunks.length)
             onProgress({
@@ -601,6 +938,9 @@ export class ONNXStemSeparator {
               progress: chunkProgress
             })
           }
+
+          // Yield to browser to keep UI responsive
+          await new Promise(resolve => setTimeout(resolve, 10))
         }
 
         if (onProgress) {
@@ -698,6 +1038,25 @@ export class ONNXStemSeparator {
   }
 
   /**
+   * Memory cleanup for low-tier devices
+   */
+  async cleanupMemory() {
+    if (typeof tf !== 'undefined') {
+      // Dispose all variables and cleanup TensorFlow.js memory
+      tf.disposeVariables()
+      await tf.nextFrame()
+    }
+
+    // Force garbage collection if available (Chrome with --js-flags="--expose-gc")
+    if (window.gc) {
+      window.gc()
+    }
+
+    // Yield to browser
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+
+  /**
    * Cleanup
    */
   async dispose() {
@@ -718,7 +1077,7 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Get status
+   * Get detailed status with device tier information
    */
   getStatus() {
     return {
@@ -726,7 +1085,21 @@ export class ONNXStemSeparator {
       vocalsModelLoaded: !!this.vocalsSession,
       onnxBackend: 'WASM',
       tensorflowBackend: this.initialized ? tf.getBackend() : 'not initialized',
-      onnxVersion: ort.env.versions.onnxruntime
+      onnxVersion: ort.env.versions.onnxruntime,
+      deviceTier: this.deviceTier,
+      deviceName: this.deviceTier ? this.classifier.getDeviceName(this.deviceTier) : null,
+      deviceProfile: this.deviceProfile ? {
+        cpuCores: this.deviceProfile.cpuCores,
+        memoryGB: this.deviceProfile.totalMemoryGB,
+        availableMB: this.deviceProfile.availableMB,
+        gpu: this.deviceProfile.gpu.tier,
+        isChromebook: this.deviceProfile.isChromebook
+      } : null,
+      currentConfig: this.config ? {
+        n_fft: this.config.n_fft,
+        chunk_size: this.config.chunk_size,
+        overlap: this.config.overlap
+      } : null
     }
   }
 }
