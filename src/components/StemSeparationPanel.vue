@@ -18,15 +18,14 @@
         </span>
       </div>
 
-      <div class="text-xs bg-blue-900 bg-opacity-20 p-2 rounded border border-blue-700">
+      <div class="text-xs p-2 rounded border" :class="onnxModelStatus.available ? 'bg-green-900 bg-opacity-20 border-green-700' : 'bg-blue-900 bg-opacity-20 border-blue-700'">
         <div class="flex items-start gap-2">
-          <svg class="w-4 h-4 mt-0.5 flex-shrink-0 text-blue-400" fill="currentColor" viewBox="0 0 20 20">
+          <svg class="w-4 h-4 mt-0.5 flex-shrink-0" :class="onnxModelStatus.available ? 'text-green-400' : 'text-blue-400'" fill="currentColor" viewBox="0 0 20 20">
             <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
           </svg>
           <div>
-            <strong>Demo Mode:</strong> Using frequency-based audio filters.
-            For AI-based separation, add a TensorFlow.js model.
-            <a href="/models/README.md" target="_blank" class="text-blue-400 hover:underline ml-1">Learn more</a>
+            <strong>{{ separatorInfo.name }}:</strong> {{ separatorInfo.description || separatorInfo.quality }}
+            <div class="text-xs text-gray-400 mt-1">Processing speed: {{ separatorInfo.speed }}</div>
           </div>
         </div>
       </div>
@@ -67,15 +66,17 @@
         </div>
 
         <!-- Info -->
-        <div class="text-xs text-gray-500 bg-gray-900 bg-opacity-50 p-3 rounded">
+        <div class="text-xs p-3 rounded" :class="onnxModelStatus.available ? 'bg-green-900 bg-opacity-30 text-green-200' : 'bg-gray-900 bg-opacity-50 text-gray-500'">
           <div class="flex items-start gap-2">
             <svg class="w-4 h-4 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
               <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
             </svg>
             <div>
-              <strong>Demo Mode:</strong> Uses frequency-based filters for fast separation (1-2 seconds).
-              Results are approximate - vocals emphasize mid-range frequencies, instrumental emphasizes bass/treble.
-              For professional-quality separation, use an AI model.
+              <strong>{{ separatorInfo.name }}:</strong> {{ separatorInfo.description || 'Processing audio with ' + separatorInfo.quality }}
+              <div class="mt-1">Expected time: {{ separatorInfo.speed }}</div>
+              <div v-if="!onnxModelStatus.available" class="mt-1 opacity-75">
+                For professional-quality separation, add the AI model to public/models/vocals.onnx
+              </div>
             </div>
           </div>
         </div>
