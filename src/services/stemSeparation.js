@@ -142,7 +142,7 @@ export class StemSeparator {
 
       // Add batch and channel dimensions [1, freq, time, 2] (magnitude, phase)
       const magnitude = tf.abs(spectrogram)
-      const phase = tf.atan2(spectrogram.imag(), spectrogram.real())
+      const phase = tf.atan2(tf.imag(spectrogram), tf.real(spectrogram))
 
       const input = tf.stack([magnitude, phase], -1).expandDims(0)
 
@@ -206,7 +206,7 @@ export class StemSeparator {
     // Apply ML-inspired separation using spectral masking
     const [vocalsSpec, instrumentalSpec] = tf.tidy(() => {
       const magnitude = tf.abs(spectrogram)
-      const phase = tf.atan2(spectrogram.imag(), spectrogram.real())
+      const phase = tf.atan2(tf.imag(spectrogram), tf.real(spectrogram))
 
       // === VOCALS MASK ===
       // Vocals are typically in 200Hz - 3.5kHz range, with emphasis on 1-3kHz
