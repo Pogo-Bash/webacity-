@@ -224,6 +224,9 @@ async function startSeparation() {
     stems.value = result
     console.log('✅ Stems separated successfully')
 
+    // Show success message instead of automatically adding stems
+    alert('✅ Stems separated successfully! Use the "Add as Track" buttons below to add them to your project.')
+
   } catch (error) {
     console.error('Failed to separate stems:', error)
     alert('Failed to separate stems: ' + error.message)
@@ -235,13 +238,22 @@ async function startSeparation() {
 function addStemAsTrack(stemType) {
   if (!stems.value) return
 
-  const buffer = stems.value[stemType]
-  const trackName = `${selectedTrack.value.name} - ${stemType.charAt(0).toUpperCase() + stemType.slice(1)}`
+  try {
+    const buffer = stems.value[stemType]
+    const trackName = `${selectedTrack.value.name} - ${stemType.charAt(0).toUpperCase() + stemType.slice(1)}`
 
-  const track = audioStore.addTrack(trackName)
-  audioStore.addClipToTrack(track.id, buffer, 0, trackName)
+    // Add track and clip
+    const track = audioStore.addTrack(trackName)
+    audioStore.addClipToTrack(track.id, buffer, 0, trackName)
 
-  console.log(`Added ${stemType} stem as new track`)
+    console.log(`✅ Added ${stemType} stem as new track`)
+
+    // Give user feedback
+    alert(`✅ ${trackName} added to timeline!`)
+  } catch (error) {
+    console.error(`Failed to add ${stemType} stem:`, error)
+    alert(`Failed to add ${stemType} stem: ` + error.message)
+  }
 }
 
 async function downloadStem(stemType) {
