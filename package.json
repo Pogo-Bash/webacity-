@@ -13,6 +13,7 @@
     "@tensorflow/tfjs": "^4.22.0",
     "@tensorflow/tfjs-backend-webgl": "^4.22.0",
     "localforage": "^1.10.0",
+    "onnxruntime-web": "^1.23.0",
     "pinia": "^3.0.3",
     "vue": "^3.5.22"
   },
