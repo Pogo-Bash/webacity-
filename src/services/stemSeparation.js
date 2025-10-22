@@ -204,7 +204,10 @@ export class StemSeparator {
     }
 
     // Apply ML-inspired separation using spectral masking
-    const [vocalsSpec, instrumentalSpec] = tf.tidy(() => {
+    // Keep magnitude and phase separate to avoid complex64 operations
+    const [vocalsMag, vocalsPhase, instrumentalMag, instrumentalPhase] = tf.tidy(() => {
+      // Extract magnitude and phase from complex spectrogram
+      // Note: tf.abs, tf.atan2, tf.real, tf.imag are supported operations
       const magnitude = tf.abs(spectrogram)
       const phase = tf.atan2(tf.imag(spectrogram), tf.real(spectrogram))
 
@@ -230,30 +233,30 @@ export class StemSeparator {
       const instrumentalMask = tf.sub(1, tf.mul(combinedVocalsMask, 0.8)) // 0.8 to prevent over-subtraction
       const instrumentalMagnitude = tf.mul(magnitude, instrumentalMask)
 
-      // Reconstruct complex spectrograms
-      const vocalsSpec = this.magnitudePhaseToComplex(vocalsMagnitude, phase)
-      const instrumentalSpec = this.magnitudePhaseToComplex(instrumentalMagnitude, phase)
-
-      return [vocalsSpec, instrumentalSpec]
+      // Return magnitude and phase separately (NOT as complex tensors)
+      // We'll reconstruct complex values during inverse FFT
+      return [vocalsMagnitude, phase, instrumentalMagnitude, phase]
     })
 
     if (onProgress) {
       onProgress({ status: 'processing', message: 'Reconstructing vocals...', progress: 70 })
     }
 
-    // Convert back to audio
-    const vocals = await this.spectrogramToAudio(vocalsSpec, buffer.sampleRate, buffer.numberOfChannels)
+    // Convert back to audio - pass magnitude and phase separately
+    const vocals = await this.magnitudePhaseToAudio(vocalsMag, vocalsPhase, buffer.sampleRate, buffer.numberOfChannels)
 
     if (onProgress) {
       onProgress({ status: 'processing', message: 'Reconstructing instrumental...', progress: 85 })
     }
 
-    const instrumental = await this.spectrogramToAudio(instrumentalSpec, buffer.sampleRate, buffer.numberOfChannels)
+    const instrumental = await this.magnitudePhaseToAudio(instrumentalMag, instrumentalPhase, buffer.sampleRate, buffer.numberOfChannels)
 
     // Cleanup tensors
     spectrogram.dispose()
-    vocalsSpec.dispose()
-    instrumentalSpec.dispose()
+    vocalsMag.dispose()
+    vocalsPhase.dispose()
+    instrumentalMag.dispose()
+    instrumentalPhase.dispose()
 
     const processingTime = ((performance.now() - startTime) / 1000).toFixed(1)
     console.log(`✅ Enhanced ML separation completed in ${processingTime}s`)
@@ -425,6 +428,107 @@ export class StemSeparator {
       audioTensor.dispose()
       spectrogramData.forEach(s => s.dispose())
     }
+  }
+
+  /**
+   * Convert magnitude and phase spectrograms to audio (WebGL-compatible)
+   * This avoids creating complex64 tensors that WebGL can't handle
+   */
+  async magnitudePhaseToAudio(magnitude, phase, sampleRate, numChannels) {
+    const { fftSize, hopLength } = this.modelConfig
+
+    // Validate inputs
+    if (!magnitude || !magnitude.shape) {
+      throw new Error('Magnitude spectrogram is null or has no shape')
+    }
+    if (!phase || !phase.shape) {
+      throw new Error('Phase spectrogram is null or has no shape')
+    }
+
+    console.log(`🔄 Converting magnitude/phase to audio: magnitude shape=[${magnitude.shape.join(', ')}]`)
+
+    const freqBins = magnitude.shape[0]
+    const numFrames = magnitude.shape[1]
+
+    console.log(`   Freq bins: ${freqBins}, Frames: ${numFrames}`)
+
+    if (numFrames <= 0 || numFrames > 1000000) {
+      throw new Error(`Invalid number of frames: ${numFrames}`)
+    }
+
+    const audioLength = (numFrames - 1) * hopLength + fftSize
+
+    console.log(`   Audio length: ${audioLength} samples`)
+
+    if (audioLength <= 0 || !isFinite(audioLength) || audioLength > 100000000) {
+      throw new Error(`Invalid audio length: ${audioLength}`)
+    }
+
+    // Initialize output audio
+    const audioArray = new Float32Array(audioLength)
+    const windowSumArray = new Float32Array(audioLength)
+
+    console.log(`   Reconstructing ${numFrames} frames...`)
+
+    // Inverse FFT for each frame
+    for (let i = 0; i < numFrames; i++) {
+      // Extract magnitude and phase for this frame
+      const frameMag = magnitude.slice([0, i], [-1, 1]).squeeze()
+      const framePhase = phase.slice([0, i], [-1, 1]).squeeze()
+
+      // Reconstruct complex frame from magnitude and phase
+      // Only create complex tensor right before irfft (where it's needed)
+      const frameComplex = tf.tidy(() => {
+        const real = tf.mul(frameMag, tf.cos(framePhase))
+        const imag = tf.mul(frameMag, tf.sin(framePhase))
+        return tf.complex(real, imag)
+      })
+
+      // Inverse FFT
+      const ifft = tf.spectral.irfft(frameComplex)
+      const windowTensor = tf.tensor1d(this.window)
+      const windowedFrame = tf.mul(ifft, windowTensor)
+
+      // Get data synchronously
+      const frameData = windowedFrame.dataSync()
+      const windowData = windowTensor.dataSync()
+
+      // Overlap-add
+      const start = i * hopLength
+      for (let j = 0; j < fftSize && start + j < audioLength; j++) {
+        audioArray[start + j] += frameData[j]
+        windowSumArray[start + j] += windowData[j]
+      }
+
+      // Clean up tensors
+      frameMag.dispose()
+      framePhase.dispose()
+      frameComplex.dispose()
+      ifft.dispose()
+      windowTensor.dispose()
+      windowedFrame.dispose()
+    }
+
+    // Normalize by window sum
+    for (let i = 0; i < audioLength; i++) {
+      const sum = windowSumArray[i]
+      audioArray[i] = sum > 1e-8 ? audioArray[i] / sum : 0
+    }
+
+    console.log(`   Creating AudioBuffer: ${numChannels} channels, ${audioLength} samples, ${sampleRate}Hz`)
+
+    // Create AudioBuffer
+    const audioContext = new AudioContext({ sampleRate })
+    const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
+
+    // Fill channels
+    for (let ch = 0; ch < numChannels; ch++) {
+      audioBuffer.copyToChannel(audioArray, ch)
+    }
+
+    console.log(`✅ Audio reconstruction complete: ${audioBuffer.duration.toFixed(2)}s`)
+
+    return audioBuffer
   }
 
   /**
