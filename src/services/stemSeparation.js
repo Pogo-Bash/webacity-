@@ -371,20 +371,20 @@ export class StemSeparator {
       throw new Error(`Audio too short. Minimum length is ${fftSize} samples (${(fftSize / sampleRate).toFixed(2)}s)`)
     }
 
-    return tf.tidy(() => {
-      // Convert audio to tensor
-      const audioTensor = tf.tensor1d(audio)
+    // Calculate number of frames
+    const numFrames = Math.floor((audio.length - fftSize) / hopLength) + 1
 
-      // Calculate number of frames
-      const numFrames = Math.floor((audio.length - fftSize) / hopLength) + 1
+    if (numFrames <= 0) {
+      throw new Error('Unable to compute spectrogram: insufficient audio length')
+    }
 
-      if (numFrames <= 0) {
-        throw new Error('Unable to compute spectrogram: insufficient audio length')
-      }
+    console.log(`🔬 Computing spectrogram: ${audio.length} samples → ${numFrames} frames`)
 
-      // Initialize spectrogram
-      const spectrogramData = []
+    // Don't use tf.tidy here because we need precise control over tensor lifecycle
+    const audioTensor = tf.tensor1d(audio)
+    const spectrogramData = []
 
+    try {
       for (let i = 0; i < numFrames; i++) {
         const start = i * hopLength
         const frame = audioTensor.slice(start, fftSize)
@@ -393,23 +393,38 @@ export class StemSeparator {
         const windowTensor = tf.tensor1d(this.window)
         const windowedFrame = tf.mul(frame, windowTensor)
 
-        // Compute FFT
+        // Compute FFT - keep the result
         const fft = tf.spectral.rfft(windowedFrame)
         spectrogramData.push(fft)
 
-        // Cleanup intermediate tensors
+        // Cleanup intermediate tensors only
+        frame.dispose()
         windowTensor.dispose()
         windowedFrame.dispose()
       }
 
-      // Stack all frames [freq_bins, num_frames]
-      const spectrogram = tf.stack(spectrogramData, 1)
+      // Stack all frames into a 2D tensor
+      // tf.stack with axis=0 creates shape [numFrames, freqBins]
+      // We need [freqBins, numFrames], so we transpose
+      const stacked = tf.stack(spectrogramData, 0)
+      console.log(`   Stacked shape: [${stacked.shape.join(', ')}]`)
 
-      // Cleanup
-      spectrogramData.forEach(s => s.dispose())
+      const spectrogram = tf.transpose(stacked, [1, 0])
+      stacked.dispose()
+
+      // Verify shape is correct
+      console.log(`📊 Spectrogram shape: [${spectrogram.shape.join(', ')}] (expected: [${this.modelConfig.numFreqBins}, ${numFrames}])`)
+
+      if (spectrogram.shape[0] !== this.modelConfig.numFreqBins || spectrogram.shape[1] !== numFrames) {
+        throw new Error(`Invalid spectrogram shape: [${spectrogram.shape.join(', ')}]`)
+      }
 
       return spectrogram
-    })
+    } finally {
+      // Cleanup
+      audioTensor.dispose()
+      spectrogramData.forEach(s => s.dispose())
+    }
   }
 
   /**
@@ -419,24 +434,44 @@ export class StemSeparator {
     // Don't use tf.tidy() here because we're creating AudioBuffer (not a tensor)
     const { fftSize, hopLength } = this.modelConfig
 
-    // Validate spectrogram shape
-    if (!spectrogram.shape || spectrogram.shape.length !== 2) {
-      throw new Error('Invalid spectrogram shape')
+    // Validate spectrogram
+    if (!spectrogram || !spectrogram.shape) {
+      throw new Error('Spectrogram is null or has no shape')
     }
 
+    console.log(`🔄 Converting spectrogram to audio: shape=[${spectrogram.shape.join(', ')}]`)
+
+    // Validate spectrogram shape
+    if (spectrogram.shape.length !== 2) {
+      throw new Error(`Invalid spectrogram dimensions: expected 2, got ${spectrogram.shape.length}`)
+    }
+
+    const freqBins = spectrogram.shape[0]
     const numFrames = spectrogram.shape[1]
-    if (numFrames <= 0) {
-      throw new Error('Invalid number of frames')
+
+    console.log(`   Freq bins: ${freqBins}, Frames: ${numFrames}`)
+
+    if (numFrames <= 0 || numFrames > 1000000) {
+      throw new Error(`Invalid number of frames: ${numFrames} (should be between 1 and 1,000,000)`)
+    }
+
+    if (freqBins !== this.modelConfig.numFreqBins) {
+      throw new Error(`Frequency bins mismatch: expected ${this.modelConfig.numFreqBins}, got ${freqBins}`)
     }
 
     const audioLength = (numFrames - 1) * hopLength + fftSize
-    if (audioLength <= 0 || !isFinite(audioLength)) {
-      throw new Error(`Invalid audio length: ${audioLength}`)
+
+    console.log(`   Audio length calculation: (${numFrames} - 1) * ${hopLength} + ${fftSize} = ${audioLength}`)
+
+    if (audioLength <= 0 || !isFinite(audioLength) || audioLength > 100000000) {
+      throw new Error(`Invalid audio length: ${audioLength} (frames=${numFrames}, hopLength=${hopLength}, fftSize=${fftSize})`)
     }
 
     // Initialize output audio
     const audioArray = new Float32Array(audioLength)
     const windowSumArray = new Float32Array(audioLength)
+
+    console.log(`   Reconstructing ${numFrames} frames...`)
 
     // Inverse FFT for each frame
     for (let i = 0; i < numFrames; i++) {
@@ -471,6 +506,8 @@ export class StemSeparator {
       audioArray[i] = sum > 1e-8 ? audioArray[i] / sum : 0
     }
 
+    console.log(`   Creating AudioBuffer: ${numChannels} channels, ${audioLength} samples, ${sampleRate}Hz`)
+
     // Create AudioBuffer
     const audioContext = new AudioContext({ sampleRate })
     const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
@@ -479,6 +516,8 @@ export class StemSeparator {
     for (let ch = 0; ch < numChannels; ch++) {
       audioBuffer.copyToChannel(audioArray, ch)
     }
+
+    console.log(`✅ Audio reconstruction complete: ${audioBuffer.duration.toFixed(2)}s`)
 
     return audioBuffer
   }
