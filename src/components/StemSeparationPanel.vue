@@ -196,12 +196,25 @@ async function startSeparation() {
   stems.value = null
 
   try {
-    // Get the track's complete audio buffer
-    const trackBuffer = selectedTrack.value.buffer
-
-    if (!trackBuffer) {
-      throw new Error('Track has no audio buffer')
+    // Get the track's audio buffer from the first clip
+    // (In the future, we might want to merge all clips)
+    if (!selectedTrack.value.clips || selectedTrack.value.clips.length === 0) {
+      throw new Error('Track has no audio clips')
     }
+
+    const firstClip = selectedTrack.value.clips[0]
+    if (!firstClip || !firstClip.buffer) {
+      throw new Error('Clip has no audio buffer')
+    }
+
+    const trackBuffer = firstClip.buffer
+
+    // Validate buffer
+    if (!trackBuffer.length || trackBuffer.length === 0) {
+      throw new Error('Audio buffer is empty')
+    }
+
+    console.log(`📊 Processing audio: ${trackBuffer.duration.toFixed(2)}s, ${trackBuffer.sampleRate}Hz, ${trackBuffer.numberOfChannels} channels`)
 
     // Separate stems
     const result = await stemSeparator.separate(trackBuffer, (progress) => {
