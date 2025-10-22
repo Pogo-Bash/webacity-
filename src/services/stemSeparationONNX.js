@@ -18,9 +18,18 @@ export class ONNXStemSeparator {
     this.config = {
       n_fft: 6144,
       hop_length: 1024,
-      dim_f: 3072,
+      dim_f: 3073, // CRITICAL FIX: Must match n_fft/2 + 1 = 6144/2 + 1 = 3073
       chunk_size: 485100, // ~11 seconds at 44.1kHz
       overlap: 0.25
+    }
+
+    // Validate frequency dimension consistency
+    const expectedFreqBins = Math.floor(this.config.n_fft / 2) + 1
+    if (expectedFreqBins !== this.config.dim_f) {
+      throw new Error(
+        `Configuration error: n_fft=${this.config.n_fft} produces ${expectedFreqBins} frequency bins, ` +
+        `but dim_f=${this.config.dim_f}. These must match to prevent phase reconstruction errors.`
+      )
     }
   }
 
@@ -166,6 +175,19 @@ export class ONNXStemSeparator {
       const numFrames = magData[0].length
       const freqBins = magData.length
 
+      // VALIDATION: Verify frequency bins match configuration
+      if (freqBins !== this.config.dim_f) {
+        console.error(
+          `❌ STFT frequency bins mismatch: got ${freqBins}, expected ${this.config.dim_f}`
+        )
+        throw new Error(
+          `STFT produced ${freqBins} frequency bins, but dim_f=${this.config.dim_f}. ` +
+          `Configuration error - these must match.`
+        )
+      }
+
+      console.log(`   ✓ STFT computed: ${numFrames} frames × ${freqBins} freq bins`)
+
       const magTransposed = []
       const phaseTransposed = []
 
@@ -230,14 +252,138 @@ export class ONNXStemSeparator {
       // Get audio data
       const audioData = audioTensor.arraySync()
 
-      // Trim to original length
+      // CRITICAL FIX: Validate ISTFT output length
+      const lengthRatio = audioData.length / originalLength
+      if (audioData.length < originalLength * 0.95) {
+        // More than 5% short - this is a critical error
+        console.error(
+          `❌ ISTFT length mismatch: got ${audioData.length} samples, expected ${originalLength} ` +
+          `(${(lengthRatio * 100).toFixed(1)}% of expected)`
+        )
+        throw new Error(
+          `ISTFT produced truncated output: ${audioData.length}/${originalLength} samples. ` +
+          `This indicates a critical processing error.`
+        )
+      }
+
+      // Trim to original length or pad if necessary
       const result = new Float32Array(originalLength)
-      for (let i = 0; i < Math.min(originalLength, audioData.length); i++) {
+      const copyLength = Math.min(originalLength, audioData.length)
+
+      for (let i = 0; i < copyLength; i++) {
         result[i] = audioData[i]
+      }
+
+      // Log warning if we had to pad with zeros
+      if (audioData.length < originalLength) {
+        const paddedSamples = originalLength - audioData.length
+        console.warn(
+          `⚠️ ISTFT output shorter than expected: padded ${paddedSamples} samples ` +
+          `(${(paddedSamples / originalLength * 100).toFixed(2)}%) with zeros`
+        )
       }
 
       return result
     })
+  }
+
+  /**
+   * Split audio into overlapping chunks
+   * Returns array of {audio: Float32Array, startSample: number}
+   */
+  splitIntoChunks(audio, chunkSize, overlapRatio) {
+    const chunks = []
+    const overlapSize = Math.floor(chunkSize * overlapRatio)
+    const hopSize = chunkSize - overlapSize
+
+    let position = 0
+    while (position < audio.length) {
+      const endPosition = Math.min(position + chunkSize, audio.length)
+      const chunkLength = endPosition - position
+
+      const chunk = new Float32Array(chunkLength)
+      for (let i = 0; i < chunkLength; i++) {
+        chunk[i] = audio[position + i]
+      }
+
+      chunks.push({
+        audio: chunk,
+        startSample: position
+      })
+
+      // Move to next chunk position
+      position += hopSize
+
+      // If we've reached the end, stop
+      if (endPosition >= audio.length) {
+        break
+      }
+    }
+
+    console.log(`   ✓ Split audio into ${chunks.length} chunks (chunk_size=${chunkSize}, overlap=${overlapRatio})`)
+    return chunks
+  }
+
+  /**
+   * Process a single audio chunk through STFT → Model → ISTFT
+   */
+  async processChunk(chunk) {
+    // STFT
+    const [magnitude, phase] = this.stft(chunk)
+
+    // Model inference
+    const vocalsMagnitude = await this.processSpectrogram(magnitude)
+
+    // ISTFT
+    const vocals = this.istft(vocalsMagnitude, phase, chunk.length)
+
+    return vocals
+  }
+
+  /**
+   * Reconstruct full-length audio from overlapping chunks using overlap-add
+   */
+  overlapAdd(chunks, chunkSize, overlapRatio, totalLength) {
+    const result = new Float32Array(totalLength)
+    const weights = new Float32Array(totalLength)
+
+    const overlapSize = Math.floor(chunkSize * overlapRatio)
+    const hopSize = chunkSize - overlapSize
+
+    for (let i = 0; i < chunks.length; i++) {
+      const { audio, startSample } = chunks[i]
+
+      // Create windowing for smooth transitions in overlap regions
+      for (let j = 0; j < audio.length; j++) {
+        let weight = 1.0
+
+        // Fade in at the start of chunk (except first chunk)
+        if (i > 0 && j < overlapSize) {
+          weight = j / overlapSize
+        }
+
+        // Fade out at the end of chunk (except last chunk)
+        if (i < chunks.length - 1 && j >= audio.length - overlapSize) {
+          weight = (audio.length - j) / overlapSize
+        }
+
+        const sampleIndex = startSample + j
+        if (sampleIndex < totalLength) {
+          result[sampleIndex] += audio[j] * weight
+          weights[sampleIndex] += weight
+        }
+      }
+    }
+
+    // Normalize by weights to account for overlapping regions
+    for (let i = 0; i < totalLength; i++) {
+      if (weights[i] > 0) {
+        result[i] /= weights[i]
+      }
+    }
+
+    console.log(`   ✓ Reconstructed full audio: ${totalLength} samples from ${chunks.length} chunks`)
+    return result
   }
 
   /**
@@ -249,21 +395,36 @@ export class ONNXStemSeparator {
       const numFrames = magnitude.length
       const freqBins = magnitude[0].length
 
-      console.log(`   Processing spectrogram: ${freqBins} freq bins × ${numFrames} time frames`)
+      console.log(`   📊 Processing spectrogram: ${freqBins} freq bins × ${numFrames} time frames`)
+
+      // VALIDATION: Ensure frequency bins match configuration
+      if (freqBins !== dim_f) {
+        throw new Error(
+          `Frequency bins mismatch: magnitude has ${freqBins} bins, but dim_f=${dim_f}`
+        )
+      }
 
       // Prepare input tensor [batch, channels, freq, time]
       // Reshape to [1, 1, dim_f, numFrames]
       const inputData = new Float32Array(dim_f * numFrames)
 
       for (let t = 0; t < numFrames; t++) {
-        for (let f = 0; f < Math.min(freqBins, dim_f); f++) {
+        for (let f = 0; f < dim_f; f++) {
           inputData[f * numFrames + t] = magnitude[t][f]
         }
       }
 
-      const inputTensor = new ort.Tensor('float32', inputData, [1, 1, dim_f, numFrames])
+      // VALIDATION: Check input isn't all zeros
+      const inputSum = inputData.reduce((sum, val) => sum + Math.abs(val), 0)
+      const inputMean = inputSum / inputData.length
+      console.log(`   ✓ Input mean magnitude: ${inputMean.toFixed(6)}`)
 
-      console.log(`   Input tensor shape: [1, 1, ${dim_f}, ${numFrames}]`)
+      if (inputSum < 0.0001) {
+        throw new Error('Input spectrogram is near-zero or silent - cannot process')
+      }
+
+      const inputTensor = new ort.Tensor('float32', inputData, [1, 1, dim_f, numFrames])
+      console.log(`   ✓ Input tensor shape: [1, 1, ${dim_f}, ${numFrames}]`)
 
       // Run model
       const feeds = { [this.vocalsSession.inputNames[0]]: inputTensor }
@@ -273,14 +434,37 @@ export class ONNXStemSeparator {
       const outputTensor = results[this.vocalsSession.outputNames[0]]
       const outputData = outputTensor.data
 
-      console.log(`   Output tensor shape:`, outputTensor.dims)
-      console.log(`   Output data length:`, outputData.length)
+      console.log(`   ✓ Output tensor shape:`, outputTensor.dims)
+      console.log(`   ✓ Output data length:`, outputData.length)
+
+      // VALIDATION: Check model output isn't all zeros (critical!)
+      const outputSum = outputData.reduce((sum, val) => sum + Math.abs(val), 0)
+      const outputMean = outputSum / outputData.length
+      console.log(`   ✓ Output mean magnitude: ${outputMean.toFixed(6)}`)
+
+      if (outputSum < 0.0001) {
+        console.error('❌ Model returned near-zero output!')
+        throw new Error(
+          'Model inference produced near-zero output. This indicates a critical model failure. ' +
+          'Check that the model is compatible with the input dimensions.'
+        )
+      }
+
+      // VALIDATION: Check output isn't suspiciously small compared to input
+      const ioRatio = outputMean / inputMean
+      console.log(`   ✓ Output/Input ratio: ${ioRatio.toFixed(4)}`)
+      if (ioRatio < 0.001) {
+        console.warn(
+          `⚠️ Model output is suspiciously small (${(ioRatio * 100).toFixed(2)}% of input). ` +
+          `Results may be poor quality.`
+        )
+      }
 
       // Reshape back to [time][freq]
       const outputMagnitude = []
       for (let t = 0; t < numFrames; t++) {
         const frame = new Float32Array(freqBins)
-        for (let f = 0; f < Math.min(freqBins, dim_f); f++) {
+        for (let f = 0; f < dim_f; f++) {
           frame[f] = outputData[f * numFrames + t]
         }
         outputMagnitude.push(frame)
@@ -315,30 +499,98 @@ export class ONNXStemSeparator {
 
       // Convert to mono
       const mono = this.audioBufferToMono(audioBuffer)
-      console.log(`   Mono audio: ${mono.length} samples`)
+      console.log(`   📏 Mono audio: ${mono.length} samples (${audioBuffer.duration.toFixed(2)}s)`)
 
-      if (onProgress) {
-        onProgress({ status: 'processing', message: 'Computing spectrogram...', progress: 20 })
+      let vocals
+
+      // CRITICAL FIX: Use chunk processing for long audio to prevent memory issues
+      const { chunk_size, overlap } = this.config
+      const useChunking = mono.length > chunk_size
+
+      if (useChunking) {
+        console.log(`   🔄 Audio exceeds chunk size - using chunked processing`)
+        console.log(`   📦 Chunk size: ${chunk_size} samples (~${(chunk_size / this.sampleRate).toFixed(1)}s)`)
+        console.log(`   🔗 Overlap: ${(overlap * 100).toFixed(0)}%`)
+
+        if (onProgress) {
+          onProgress({ status: 'processing', message: 'Splitting audio into chunks...', progress: 20 })
+        }
+
+        // Split into overlapping chunks
+        const audioChunks = this.splitIntoChunks(mono, chunk_size, overlap)
+
+        if (onProgress) {
+          onProgress({ status: 'processing', message: `Processing ${audioChunks.length} chunks...`, progress: 25 })
+        }
+
+        // Process each chunk
+        const processedChunks = []
+        for (let i = 0; i < audioChunks.length; i++) {
+          console.log(`   🎵 Processing chunk ${i + 1}/${audioChunks.length}...`)
+
+          const vocals = await this.processChunk(audioChunks[i].audio)
+
+          processedChunks.push({
+            audio: vocals,
+            startSample: audioChunks[i].startSample
+          })
+
+          if (onProgress) {
+            const chunkProgress = 25 + (45 * (i + 1) / audioChunks.length)
+            onProgress({
+              status: 'processing',
+              message: `Processing chunk ${i + 1}/${audioChunks.length}...`,
+              progress: chunkProgress
+            })
+          }
+        }
+
+        if (onProgress) {
+          onProgress({ status: 'processing', message: 'Reconstructing full audio...', progress: 70 })
+        }
+
+        // Reconstruct using overlap-add
+        vocals = this.overlapAdd(processedChunks, chunk_size, overlap, mono.length)
+        console.log(`   ✓ Vocals reconstructed from chunks: ${vocals.length} samples`)
+      } else {
+        console.log(`   ⚡ Audio fits in single chunk - processing directly`)
+
+        if (onProgress) {
+          onProgress({ status: 'processing', message: 'Computing spectrogram...', progress: 20 })
+        }
+
+        // STFT with TensorFlow.js (fast!)
+        const [magnitude, phase] = this.stft(mono)
+        console.log(`   ✓ Spectrogram computed: ${magnitude[0].length} freq bins × ${magnitude.length} frames`)
+
+        if (onProgress) {
+          onProgress({ status: 'processing', message: 'Running AI model...', progress: 40 })
+        }
+
+        // Process through ONNX model
+        const vocalsMagnitude = await this.processSpectrogram(magnitude)
+
+        if (onProgress) {
+          onProgress({ status: 'processing', message: 'Reconstructing audio...', progress: 70 })
+        }
+
+        // ISTFT with TensorFlow.js (fast!)
+        vocals = this.istft(vocalsMagnitude, phase, mono.length)
+        console.log(`   ✓ Vocals reconstructed: ${vocals.length} samples`)
       }
 
-      // STFT with TensorFlow.js (fast!)
-      const [magnitude, phase] = this.stft(mono)
-      console.log(`   Spectrogram computed: ${magnitude[0].length} freq bins × ${magnitude.length} frames`)
+      // VALIDATION: Check vocals output isn't silent
+      const vocalsSum = vocals.reduce((sum, val) => sum + Math.abs(val), 0)
+      const vocalsRMS = Math.sqrt(vocals.reduce((sum, val) => sum + val * val, 0) / vocals.length)
+      console.log(`   ✓ Vocals RMS: ${vocalsRMS.toFixed(6)}`)
 
-      if (onProgress) {
-        onProgress({ status: 'processing', message: 'Running AI model...', progress: 40 })
+      if (vocalsSum < 0.0001) {
+        console.error('❌ ISTFT produced silent vocals output!')
+        throw new Error(
+          'Vocal stem reconstruction produced silent output. This indicates a critical processing error. ' +
+          'Check STFT/ISTFT configuration and model compatibility.'
+        )
       }
-
-      // Process through ONNX model
-      const vocalsMagnitude = await this.processSpectrogram(magnitude)
-
-      if (onProgress) {
-        onProgress({ status: 'processing', message: 'Reconstructing audio...', progress: 70 })
-      }
-
-      // ISTFT with TensorFlow.js (fast!)
-      const vocals = this.istft(vocalsMagnitude, phase, mono.length)
-      console.log(`   Vocals reconstructed: ${vocals.length} samples`)
 
       if (onProgress) {
         onProgress({ status: 'processing', message: 'Creating instrumental...', progress: 85 })
@@ -349,6 +601,11 @@ export class ONNXStemSeparator {
       for (let i = 0; i < mono.length; i++) {
         instrumental[i] = mono[i] - vocals[i]
       }
+
+      // VALIDATION: Check instrumental output isn't silent
+      const instrumentalSum = instrumental.reduce((sum, val) => sum + Math.abs(val), 0)
+      const instrumentalRMS = Math.sqrt(instrumental.reduce((sum, val) => sum + val * val, 0) / instrumental.length)
+      console.log(`   ✓ Instrumental RMS: ${instrumentalRMS.toFixed(6)}`)
 
       // Convert to AudioBuffers
       const vocalsBuffer = this.float32ToAudioBuffer(vocals, audioBuffer.sampleRate, audioBuffer.numberOfChannels)
