@@ -406,12 +406,20 @@ export class StemSeparator {
    * Convert spectrogram back to audio using inverse STFT
    */
   async spectrogramToAudio(spectrogram, sampleRate, numChannels) {
-    return tf.tidy(() => {
-      const { fftSize, hopLength } = this.modelConfig
+    const { fftSize, hopLength } = this.modelConfig
 
-      const numFrames = spectrogram.shape[1]
-      const audioLength = (numFrames - 1) * hopLength + fftSize
+    const numFrames = spectrogram.shape[1]
+    const audioLength = (numFrames - 1) * hopLength + fftSize
 
+    // Validate audio length
+    if (!audioLength || audioLength <= 0 || audioLength > 10000000) {
+      throw new Error(`Invalid audio length: ${audioLength}`)
+    }
+
+    console.log(`Reconstructing audio: ${numFrames} frames → ${audioLength} samples`)
+
+    // Perform STFT reconstruction
+    const audioArray = tf.tidy(() => {
       // Initialize output audio
       const output = tf.buffer([audioLength])
       const windowSum = tf.buffer([audioLength])
@@ -441,24 +449,30 @@ export class StemSeparator {
         ifft.dispose()
       }
 
-      // Normalize by window sum
-      const audioArray = new Float32Array(audioLength)
+      // Normalize by window sum and convert to array
+      const result = new Float32Array(audioLength)
       for (let i = 0; i < audioLength; i++) {
         const sum = windowSum.get(i)
-        audioArray[i] = sum > 1e-8 ? output.get(i) / sum : 0
+        result[i] = sum > 1e-8 ? output.get(i) / sum : 0
       }
 
-      // Create AudioBuffer
-      const audioContext = new AudioContext({ sampleRate })
-      const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
-
-      // Fill channels
-      for (let ch = 0; ch < numChannels; ch++) {
-        audioBuffer.copyToChannel(audioArray, ch)
-      }
-
-      return audioBuffer
+      return result
     })
+
+    // Create AudioBuffer outside of tf.tidy()
+    // Use a temporary context or reuse existing one
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate })
+    const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
+
+    // Fill channels
+    for (let ch = 0; ch < numChannels; ch++) {
+      audioBuffer.copyToChannel(audioArray, ch)
+    }
+
+    // Close temporary context to free resources
+    await audioContext.close()
+
+    return audioBuffer
   }
 
   /**
