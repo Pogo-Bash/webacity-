@@ -364,18 +364,27 @@ export class StemSeparator {
    * Compute Short-Time Fourier Transform (STFT)
    */
   async computeSpectrogram(audio, sampleRate) {
-    return tf.tidy(() => {
-      const { fftSize, hopLength } = this.modelConfig
+    const { fftSize, hopLength } = this.modelConfig
 
-      // Convert audio to tensor
-      const audioTensor = tf.tensor1d(audio)
+    // Validate input
+    if (!audio || audio.length < fftSize) {
+      throw new Error(`Audio too short. Minimum length is ${fftSize} samples (${(fftSize / sampleRate).toFixed(2)}s)`)
+    }
 
-      // Calculate number of frames
-      const numFrames = Math.floor((audio.length - fftSize) / hopLength) + 1
+    // Calculate number of frames
+    const numFrames = Math.floor((audio.length - fftSize) / hopLength) + 1
 
-      // Initialize spectrogram
-      const spectrogramData = []
+    if (numFrames <= 0) {
+      throw new Error('Unable to compute spectrogram: insufficient audio length')
+    }
 
+    console.log(`🔬 Computing spectrogram: ${audio.length} samples → ${numFrames} frames`)
+
+    // Don't use tf.tidy here because we need precise control over tensor lifecycle
+    const audioTensor = tf.tensor1d(audio)
+    const spectrogramData = []
+
+    try {
       for (let i = 0; i < numFrames; i++) {
         const start = i * hopLength
         const frame = audioTensor.slice(start, fftSize)
@@ -384,84 +393,123 @@ export class StemSeparator {
         const windowTensor = tf.tensor1d(this.window)
         const windowedFrame = tf.mul(frame, windowTensor)
 
-        // Compute FFT
+        // Compute FFT - keep the result
         const fft = tf.spectral.rfft(windowedFrame)
         spectrogramData.push(fft)
 
+        // Cleanup intermediate tensors only
+        frame.dispose()
         windowTensor.dispose()
+        windowedFrame.dispose()
       }
 
-      // Stack all frames [freq_bins, num_frames]
-      const spectrogram = tf.stack(spectrogramData, 1)
+      // Stack all frames into a 2D tensor
+      // tf.stack with axis=0 creates shape [numFrames, freqBins]
+      // We need [freqBins, numFrames], so we transpose
+      const stacked = tf.stack(spectrogramData, 0)
+      console.log(`   Stacked shape: [${stacked.shape.join(', ')}]`)
 
+      const spectrogram = tf.transpose(stacked, [1, 0])
+      stacked.dispose()
+
+      // Verify shape is correct
+      console.log(`📊 Spectrogram shape: [${spectrogram.shape.join(', ')}] (expected: [${this.modelConfig.numFreqBins}, ${numFrames}])`)
+
+      if (spectrogram.shape[0] !== this.modelConfig.numFreqBins || spectrogram.shape[1] !== numFrames) {
+        throw new Error(`Invalid spectrogram shape: [${spectrogram.shape.join(', ')}]`)
+      }
+
+      return spectrogram
+    } finally {
       // Cleanup
       audioTensor.dispose()
       spectrogramData.forEach(s => s.dispose())
-
-      return spectrogram
-    })
+    }
   }
 
   /**
    * Convert spectrogram back to audio using inverse STFT
    */
   async spectrogramToAudio(spectrogram, sampleRate, numChannels) {
+    // Don't use tf.tidy() here because we're creating AudioBuffer (not a tensor)
     const { fftSize, hopLength } = this.modelConfig
 
-    const numFrames = spectrogram.shape[1]
-    const audioLength = (numFrames - 1) * hopLength + fftSize
-
-    // Validate audio length
-    if (!audioLength || audioLength <= 0 || audioLength > 10000000) {
-      throw new Error(`Invalid audio length: ${audioLength}`)
+    // Validate spectrogram
+    if (!spectrogram || !spectrogram.shape) {
+      throw new Error('Spectrogram is null or has no shape')
     }
 
-    console.log(`Reconstructing audio: ${numFrames} frames → ${audioLength} samples`)
+    console.log(`🔄 Converting spectrogram to audio: shape=[${spectrogram.shape.join(', ')}]`)
 
-    // Perform STFT reconstruction
-    const audioArray = tf.tidy(() => {
-      // Initialize output audio
-      const output = tf.buffer([audioLength])
-      const windowSum = tf.buffer([audioLength])
+    // Validate spectrogram shape
+    if (spectrogram.shape.length !== 2) {
+      throw new Error(`Invalid spectrogram dimensions: expected 2, got ${spectrogram.shape.length}`)
+    }
 
-      // Inverse FFT for each frame
-      for (let i = 0; i < numFrames; i++) {
-        const frame = spectrogram.slice([0, i], [-1, 1]).squeeze()
+    const freqBins = spectrogram.shape[0]
+    const numFrames = spectrogram.shape[1]
 
-        // Inverse FFT
-        const ifft = tf.spectral.irfft(frame)
+    console.log(`   Freq bins: ${freqBins}, Frames: ${numFrames}`)
 
-        // Apply window
-        const windowTensor = tf.tensor1d(this.window)
-        const windowedFrame = tf.mul(ifft, windowTensor)
+    if (numFrames <= 0 || numFrames > 1000000) {
+      throw new Error(`Invalid number of frames: ${numFrames} (should be between 1 and 1,000,000)`)
+    }
 
-        // Overlap-add
-        const start = i * hopLength
-        const frameData = windowedFrame.dataSync()
-        const windowData = windowTensor.dataSync()
+    if (freqBins !== this.modelConfig.numFreqBins) {
+      throw new Error(`Frequency bins mismatch: expected ${this.modelConfig.numFreqBins}, got ${freqBins}`)
+    }
 
-        for (let j = 0; j < fftSize && start + j < audioLength; j++) {
-          output.set(output.get(start + j) + frameData[j], start + j)
-          windowSum.set(windowSum.get(start + j) + windowData[j], start + j)
-        }
+    const audioLength = (numFrames - 1) * hopLength + fftSize
 
-        windowTensor.dispose()
-        ifft.dispose()
+    console.log(`   Audio length calculation: (${numFrames} - 1) * ${hopLength} + ${fftSize} = ${audioLength}`)
+
+    if (audioLength <= 0 || !isFinite(audioLength) || audioLength > 100000000) {
+      throw new Error(`Invalid audio length: ${audioLength} (frames=${numFrames}, hopLength=${hopLength}, fftSize=${fftSize})`)
+    }
+
+    // Initialize output audio
+    const audioArray = new Float32Array(audioLength)
+    const windowSumArray = new Float32Array(audioLength)
+
+    console.log(`   Reconstructing ${numFrames} frames...`)
+
+    // Inverse FFT for each frame
+    for (let i = 0; i < numFrames; i++) {
+      const frame = spectrogram.slice([0, i], [-1, 1]).squeeze()
+
+      // Inverse FFT
+      const ifft = tf.spectral.irfft(frame)
+      const windowTensor = tf.tensor1d(this.window)
+      const windowedFrame = tf.mul(ifft, windowTensor)
+
+      // Get data synchronously
+      const frameData = windowedFrame.dataSync()
+      const windowData = windowTensor.dataSync()
+
+      // Overlap-add
+      const start = i * hopLength
+      for (let j = 0; j < fftSize && start + j < audioLength; j++) {
+        audioArray[start + j] += frameData[j]
+        windowSumArray[start + j] += windowData[j]
       }
 
-      // Normalize by window sum and convert to array
-      const result = new Float32Array(audioLength)
-      for (let i = 0; i < audioLength; i++) {
-        const sum = windowSum.get(i)
-        result[i] = sum > 1e-8 ? output.get(i) / sum : 0
-      }
+      // Clean up tensors
+      frame.dispose()
+      ifft.dispose()
+      windowTensor.dispose()
+      windowedFrame.dispose()
+    }
 
-      return result
-    })
+    // Normalize by window sum
+    for (let i = 0; i < audioLength; i++) {
+      const sum = windowSumArray[i]
+      audioArray[i] = sum > 1e-8 ? audioArray[i] / sum : 0
+    }
 
-    // Create AudioBuffer outside of tf.tidy()
-    // Use a temporary context or reuse existing one
-    const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate })
+    console.log(`   Creating AudioBuffer: ${numChannels} channels, ${audioLength} samples, ${sampleRate}Hz`)
+
+    // Create AudioBuffer
+    const audioContext = new AudioContext({ sampleRate })
     const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
 
     // Fill channels
@@ -469,8 +517,7 @@ export class StemSeparator {
       audioBuffer.copyToChannel(audioArray, ch)
     }
 
-    // Close temporary context to free resources
-    await audioContext.close()
+    console.log(`✅ Audio reconstruction complete: ${audioBuffer.duration.toFixed(2)}s`)
 
     return audioBuffer
   }
