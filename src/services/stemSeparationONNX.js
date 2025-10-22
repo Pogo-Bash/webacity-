@@ -49,13 +49,41 @@ export class ONNXStemSeparator {
       ort.env.wasm.simd = true
       ort.env.wasm.proxy = false
 
-      // Initialize TensorFlow.js backend
+      // Initialize TensorFlow.js backend with fallback strategy
       await tf.ready()
-      await tf.setBackend('webgl')
+
+      // CRITICAL FIX: Try multiple backends with fallback to handle WebGL shader errors
+      const backends = ['webgl', 'wasm', 'cpu']
+      let backendSet = false
+      let lastError = null
+
+      for (const backend of backends) {
+        try {
+          console.log(`🔄 Attempting to initialize TensorFlow.js with '${backend}' backend...`)
+          const success = await tf.setBackend(backend)
+
+          if (success) {
+            await tf.ready()
+            console.log(`✅ TensorFlow.js backend: ${tf.getBackend()}`)
+            backendSet = true
+            break
+          }
+        } catch (error) {
+          console.warn(`⚠️  Failed to set '${backend}' backend:`, error.message)
+          lastError = error
+          // Try next backend
+          continue
+        }
+      }
+
+      if (!backendSet) {
+        throw new Error(
+          `Failed to initialize any TensorFlow.js backend. Last error: ${lastError?.message || 'Unknown error'}`
+        )
+      }
 
       console.log(`✅ ONNX Runtime initialized with WASM backend`)
       console.log(`   ONNX Threads: ${ort.env.wasm.numThreads}`)
-      console.log(`✅ TensorFlow.js backend: ${tf.getBackend()}`)
 
       if (onProgress) {
         onProgress({ status: 'ready', message: 'ONNX Runtime ready', progress: 100 })
@@ -148,143 +176,173 @@ export class ONNXStemSeparator {
    * Returns [magnitude, phase]
    */
   stft(audio) {
-    return tf.tidy(() => {
-      const { n_fft, hop_length } = this.config
+    try {
+      return tf.tidy(() => {
+        const { n_fft, hop_length } = this.config
 
-      // Convert to tensor
-      const audioTensor = tf.tensor1d(audio)
+        // Convert to tensor
+        const audioTensor = tf.tensor1d(audio)
 
-      // Compute STFT
-      const stftTensor = tf.signal.stft(
-        audioTensor,
-        n_fft,
-        hop_length,
-        n_fft,
-        tf.signal.hannWindow
-      )
-
-      // Split into magnitude and phase
-      const magnitude = tf.abs(stftTensor)
-      const phase = tf.atan2(tf.imag(stftTensor), tf.real(stftTensor))
-
-      // Get data as arrays [freq, time]
-      const magData = magnitude.arraySync()
-      const phaseData = phase.arraySync()
-
-      // Transpose to [time, freq] for easier processing
-      const numFrames = magData[0].length
-      const freqBins = magData.length
-
-      // VALIDATION: Verify frequency bins match configuration
-      if (freqBins !== this.config.dim_f) {
-        console.error(
-          `❌ STFT frequency bins mismatch: got ${freqBins}, expected ${this.config.dim_f}`
+        // Compute STFT
+        const stftTensor = tf.signal.stft(
+          audioTensor,
+          n_fft,
+          hop_length,
+          n_fft,
+          tf.signal.hannWindow
         )
-        throw new Error(
-          `STFT produced ${freqBins} frequency bins, but dim_f=${this.config.dim_f}. ` +
-          `Configuration error - these must match.`
-        )
-      }
 
-      console.log(`   ✓ STFT computed: ${numFrames} frames × ${freqBins} freq bins`)
+        // Split into magnitude and phase
+        const magnitude = tf.abs(stftTensor)
+        const phase = tf.atan2(tf.imag(stftTensor), tf.real(stftTensor))
 
-      const magTransposed = []
-      const phaseTransposed = []
+        // Get data as arrays [freq, time]
+        const magData = magnitude.arraySync()
+        const phaseData = phase.arraySync()
 
-      for (let t = 0; t < numFrames; t++) {
-        const magFrame = new Float32Array(freqBins)
-        const phaseFrame = new Float32Array(freqBins)
-        for (let f = 0; f < freqBins; f++) {
-          magFrame[f] = magData[f][t]
-          phaseFrame[f] = phaseData[f][t]
+        // Transpose to [time, freq] for easier processing
+        const numFrames = magData[0].length
+        const freqBins = magData.length
+
+        // VALIDATION: Verify frequency bins match configuration
+        if (freqBins !== this.config.dim_f) {
+          console.error(
+            `❌ STFT frequency bins mismatch: got ${freqBins}, expected ${this.config.dim_f}`
+          )
+          throw new Error(
+            `STFT produced ${freqBins} frequency bins, but dim_f=${this.config.dim_f}. ` +
+            `Configuration error - these must match.`
+          )
         }
-        magTransposed.push(magFrame)
-        phaseTransposed.push(phaseFrame)
+
+        console.log(`   ✓ STFT computed: ${numFrames} frames × ${freqBins} freq bins`)
+
+        const magTransposed = []
+        const phaseTransposed = []
+
+        for (let t = 0; t < numFrames; t++) {
+          const magFrame = new Float32Array(freqBins)
+          const phaseFrame = new Float32Array(freqBins)
+          for (let f = 0; f < freqBins; f++) {
+            magFrame[f] = magData[f][t]
+            phaseFrame[f] = phaseData[f][t]
+          }
+          magTransposed.push(magFrame)
+          phaseTransposed.push(phaseFrame)
+        }
+
+        return [magTransposed, phaseTransposed]
+      })
+    } catch (error) {
+      console.error('❌ STFT computation failed:', error)
+
+      // Check if it's a WebGL/shader error
+      if (error.message.includes('shader') || error.message.includes('WebGL') || error.message.includes('fragment')) {
+        throw new Error(
+          `STFT failed due to WebGL/shader error. Current backend: ${tf.getBackend()}. ` +
+          `This usually means the browser's GPU cannot handle the tensor operations. ` +
+          `Try refreshing the page to use a fallback backend (WASM or CPU).`
+        )
       }
 
-      return [magTransposed, phaseTransposed]
-    })
+      throw new Error(`STFT computation failed: ${error.message}`)
+    }
   }
 
   /**
    * ISTFT using TensorFlow.js (fast GPU implementation)
    */
   istft(magnitude, phase, originalLength) {
-    return tf.tidy(() => {
-      const { n_fft, hop_length } = this.config
+    try {
+      return tf.tidy(() => {
+        const { n_fft, hop_length } = this.config
 
-      const numFrames = magnitude.length
-      const freqBins = magnitude[0].length
+        const numFrames = magnitude.length
+        const freqBins = magnitude[0].length
 
-      // Transpose back to [freq, time]
-      const magArray = []
-      const phaseArray = []
+        // Transpose back to [freq, time]
+        const magArray = []
+        const phaseArray = []
 
-      for (let f = 0; f < freqBins; f++) {
-        const magFreq = []
-        const phaseFreq = []
-        for (let t = 0; t < numFrames; t++) {
-          magFreq.push(magnitude[t][f])
-          phaseFreq.push(phase[t][f])
+        for (let f = 0; f < freqBins; f++) {
+          const magFreq = []
+          const phaseFreq = []
+          for (let t = 0; t < numFrames; t++) {
+            magFreq.push(magnitude[t][f])
+            phaseFreq.push(phase[t][f])
+          }
+          magArray.push(magFreq)
+          phaseArray.push(phaseFreq)
         }
-        magArray.push(magFreq)
-        phaseArray.push(phaseFreq)
-      }
 
-      // Create complex tensor from magnitude and phase
-      const magTensor = tf.tensor2d(magArray)
-      const phaseTensor = tf.tensor2d(phaseArray)
+        // Create complex tensor from magnitude and phase
+        const magTensor = tf.tensor2d(magArray)
+        const phaseTensor = tf.tensor2d(phaseArray)
 
-      const realPart = tf.mul(magTensor, tf.cos(phaseTensor))
-      const imagPart = tf.mul(magTensor, tf.sin(phaseTensor))
+        const realPart = tf.mul(magTensor, tf.cos(phaseTensor))
+        const imagPart = tf.mul(magTensor, tf.sin(phaseTensor))
 
-      const stftComplex = tf.complex(realPart, imagPart)
+        const stftComplex = tf.complex(realPart, imagPart)
 
-      // Inverse STFT
-      const audioTensor = tf.signal.inverseStft(
-        stftComplex,
-        n_fft,
-        hop_length,
-        n_fft,
-        tf.signal.hannWindow
-      )
-
-      // Get audio data
-      const audioData = audioTensor.arraySync()
-
-      // CRITICAL FIX: Validate ISTFT output length
-      const lengthRatio = audioData.length / originalLength
-      if (audioData.length < originalLength * 0.95) {
-        // More than 5% short - this is a critical error
-        console.error(
-          `❌ ISTFT length mismatch: got ${audioData.length} samples, expected ${originalLength} ` +
-          `(${(lengthRatio * 100).toFixed(1)}% of expected)`
+        // Inverse STFT
+        const audioTensor = tf.signal.inverseStft(
+          stftComplex,
+          n_fft,
+          hop_length,
+          n_fft,
+          tf.signal.hannWindow
         )
+
+        // Get audio data
+        const audioData = audioTensor.arraySync()
+
+        // CRITICAL FIX: Validate ISTFT output length
+        const lengthRatio = audioData.length / originalLength
+        if (audioData.length < originalLength * 0.95) {
+          // More than 5% short - this is a critical error
+          console.error(
+            `❌ ISTFT length mismatch: got ${audioData.length} samples, expected ${originalLength} ` +
+            `(${(lengthRatio * 100).toFixed(1)}% of expected)`
+          )
+          throw new Error(
+            `ISTFT produced truncated output: ${audioData.length}/${originalLength} samples. ` +
+            `This indicates a critical processing error.`
+          )
+        }
+
+        // Trim to original length or pad if necessary
+        const result = new Float32Array(originalLength)
+        const copyLength = Math.min(originalLength, audioData.length)
+
+        for (let i = 0; i < copyLength; i++) {
+          result[i] = audioData[i]
+        }
+
+        // Log warning if we had to pad with zeros
+        if (audioData.length < originalLength) {
+          const paddedSamples = originalLength - audioData.length
+          console.warn(
+            `⚠️ ISTFT output shorter than expected: padded ${paddedSamples} samples ` +
+            `(${(paddedSamples / originalLength * 100).toFixed(2)}%) with zeros`
+          )
+        }
+
+        return result
+      })
+    } catch (error) {
+      console.error('❌ ISTFT computation failed:', error)
+
+      // Check if it's a WebGL/shader error
+      if (error.message.includes('shader') || error.message.includes('WebGL') || error.message.includes('fragment')) {
         throw new Error(
-          `ISTFT produced truncated output: ${audioData.length}/${originalLength} samples. ` +
-          `This indicates a critical processing error.`
+          `ISTFT failed due to WebGL/shader error. Current backend: ${tf.getBackend()}. ` +
+          `This usually means the browser's GPU cannot handle the tensor operations. ` +
+          `Try refreshing the page to use a fallback backend (WASM or CPU).`
         )
       }
 
-      // Trim to original length or pad if necessary
-      const result = new Float32Array(originalLength)
-      const copyLength = Math.min(originalLength, audioData.length)
-
-      for (let i = 0; i < copyLength; i++) {
-        result[i] = audioData[i]
-      }
-
-      // Log warning if we had to pad with zeros
-      if (audioData.length < originalLength) {
-        const paddedSamples = originalLength - audioData.length
-        console.warn(
-          `⚠️ ISTFT output shorter than expected: padded ${paddedSamples} samples ` +
-          `(${(paddedSamples / originalLength * 100).toFixed(2)}%) with zeros`
-        )
-      }
-
-      return result
-    })
+      throw new Error(`ISTFT computation failed: ${error.message}`)
+    }
   }
 
   /**
@@ -666,7 +724,8 @@ export class ONNXStemSeparator {
     return {
       initialized: this.initialized,
       vocalsModelLoaded: !!this.vocalsSession,
-      backend: 'WASM + TensorFlow.js WebGL',
+      onnxBackend: 'WASM',
+      tensorflowBackend: this.initialized ? tf.getBackend() : 'not initialized',
       onnxVersion: ort.env.versions.onnxruntime
     }
   }
