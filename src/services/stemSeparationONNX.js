@@ -43,17 +43,15 @@ export class ONNXStemSeparator {
         onProgress({ status: 'loading', message: 'Initializing ONNX Runtime...', progress: 10 })
       }
 
-      // Configure ONNX Runtime for browser
+      // Configure ONNX Runtime for browser with WASM backend
+      // Using WASM for maximum compatibility (avoids WebGPU shader issues)
       ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4
       ort.env.wasm.simd = true
+      ort.env.wasm.proxy = false
 
-      // Try WebGPU first, fallback to WASM
-      try {
-        ort.env.webgpu.powerPreference = 'high-performance'
-        console.log('✅ ONNX Runtime initialized with WebGPU support')
-      } catch (e) {
-        console.log('⚠️ WebGPU not available, using WASM backend')
-      }
+      console.log(`✅ ONNX Runtime initialized with WASM backend`)
+      console.log(`   Threads: ${ort.env.wasm.numThreads}`)
+      console.log(`   SIMD: ${ort.env.wasm.simd}`)
 
       if (onProgress) {
         onProgress({
@@ -86,34 +84,20 @@ export class ONNXStemSeparator {
 
       console.log(`📥 Loading ${modelType} model from: ${modelUrl}`)
 
-      // Try WebGPU first, fallback to WASM if shader compilation fails
-      let session = null
+      // Use WASM backend for maximum compatibility
+      // WebGPU can cause shader compilation issues on some GPUs
+      console.log('🔧 Loading model with WASM backend (stable, works on all browsers)')
 
-      try {
-        console.log('🎮 Attempting to load model with WebGPU...')
-        const webgpuOptions = {
-          executionProviders: ['webgpu'],
-          graphOptimizationLevel: 'all',
-          enableCpuMemArena: true,
-          enableMemPattern: true,
-          executionMode: 'sequential'
-        }
-        session = await ort.InferenceSession.create(modelUrl, webgpuOptions)
-        console.log(`✅ ${modelType} model loaded with WebGPU acceleration`)
-      } catch (webgpuError) {
-        console.warn(`⚠️ WebGPU failed (${webgpuError.message}), falling back to WASM...`)
-
-        // Fallback to WASM
-        const wasmOptions = {
-          executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all',
-          enableCpuMemArena: true,
-          enableMemPattern: true,
-          executionMode: 'sequential'
-        }
-        session = await ort.InferenceSession.create(modelUrl, wasmOptions)
-        console.log(`✅ ${modelType} model loaded with WASM backend (slower but stable)`)
+      const wasmOptions = {
+        executionProviders: ['wasm'],
+        graphOptimizationLevel: 'all',
+        enableCpuMemArena: true,
+        enableMemPattern: true,
+        executionMode: 'sequential'
       }
+
+      const session = await ort.InferenceSession.create(modelUrl, wasmOptions)
+      console.log(`✅ ${modelType} model loaded successfully with WASM backend`)
 
       console.log(`✅ ${modelType} model loaded successfully`)
       console.log(`   Input names:`, session.inputNames)
