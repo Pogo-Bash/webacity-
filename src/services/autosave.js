@@ -197,26 +197,70 @@ export class AutosaveService {
         // Save each clip's audio buffer
         for (const clip of track.clips) {
           if (clip.buffer) {
-            const clipFileName = `${track.id}_${clip.id}.wav`
+            try {
+              const clipFileName = `${track.id}_${clip.id}.wav`
 
-            // Convert audio buffer to WAV
-            const wavData = this.audioBufferToWav(clip.buffer)
+              // Skip very large buffers that might cause issues (> 5 minutes)
+              if (clip.buffer.duration > 300) {
+                console.warn(`⚠️ Skipping autosave for large clip: ${clip.name} (${clip.buffer.duration.toFixed(1)}s)`)
+                trackData.clips.push({
+                  id: clip.id,
+                  fileName: null, // Mark as not saved
+                  name: clip.name,
+                  startTime: clip.startTime,
+                  duration: clip.duration,
+                  color: clip.color,
+                  skipped: true
+                })
+                continue
+              }
 
-            // Write to OPFS
-            const fileHandle = await this.autosaveDir.getFileHandle(clipFileName, { create: true })
-            const writable = await fileHandle.createWritable()
-            await writable.write(wavData)
-            await writable.close()
+              // Convert audio buffer to WAV
+              const wavData = this.audioBufferToWav(clip.buffer)
 
-            // Save clip metadata
-            trackData.clips.push({
-              id: clip.id,
-              fileName: clipFileName,
-              name: clip.name,
-              startTime: clip.startTime,
-              duration: clip.duration,
-              color: clip.color
-            })
+              // Validate WAV data size (skip if > 50MB)
+              if (wavData.byteLength > 50 * 1024 * 1024) {
+                console.warn(`⚠️ Skipping autosave for large WAV file: ${clip.name} (${(wavData.byteLength / 1024 / 1024).toFixed(1)}MB)`)
+                trackData.clips.push({
+                  id: clip.id,
+                  fileName: null,
+                  name: clip.name,
+                  startTime: clip.startTime,
+                  duration: clip.duration,
+                  color: clip.color,
+                  skipped: true
+                })
+                continue
+              }
+
+              // Write to OPFS
+              const fileHandle = await this.autosaveDir.getFileHandle(clipFileName, { create: true })
+              const writable = await fileHandle.createWritable()
+              await writable.write(wavData)
+              await writable.close()
+
+              // Save clip metadata
+              trackData.clips.push({
+                id: clip.id,
+                fileName: clipFileName,
+                name: clip.name,
+                startTime: clip.startTime,
+                duration: clip.duration,
+                color: clip.color
+              })
+            } catch (clipError) {
+              console.error(`❌ Failed to save clip ${clip.name}:`, clipError)
+              // Continue with other clips even if one fails
+              trackData.clips.push({
+                id: clip.id,
+                fileName: null,
+                name: clip.name,
+                startTime: clip.startTime,
+                duration: clip.duration,
+                color: clip.color,
+                error: true
+              })
+            }
           }
         }
 

@@ -144,6 +144,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
 import { storeToRefs } from 'pinia'
 import { stemSeparator } from '../services/stemSeparation'
+import { onnxStemSeparator } from '../services/stemSeparationONNX'
 
 defineProps({
   visible: {
@@ -156,6 +157,13 @@ defineEmits(['close'])
 
 const audioStore = useAudioStore()
 const { selectedTrack } = storeToRefs(audioStore)
+
+const separatorMode = ref('auto') // 'auto', 'demo', 'onnx'
+const onnxModelStatus = ref({
+  available: false,
+  loading: false,
+  error: null
+})
 
 const tfStatus = ref({
   initialized: false,
@@ -179,15 +187,80 @@ const canSeparate = computed(() => {
          !processing.value
 })
 
+const separatorInfo = computed(() => {
+  if (onnxModelStatus.value.available) {
+    return {
+      name: 'AI Model (ONNX)',
+      quality: '⭐⭐⭐⭐⭐ Professional',
+      speed: '30-45s for 90s audio',
+      description: 'UVR MDX-NET AI model with WebGPU acceleration'
+    }
+  } else {
+    return {
+      name: 'Demo Mode (Filters)',
+      quality: '⭐⭐ Basic',
+      speed: '1-2 seconds',
+      description: 'Fast frequency-based separation for previews'
+    }
+  }
+})
+
 onMounted(async () => {
-  // Initialize TensorFlow.js
+  // Initialize TensorFlow.js fallback
   try {
     await stemSeparator.initialize()
     tfStatus.value = stemSeparator.getStatus()
   } catch (error) {
     console.error('Failed to initialize stem separator:', error)
   }
+
+  // Check if ONNX model is available
+  checkONNXModelAvailability()
 })
+
+async function checkONNXModelAvailability() {
+  try {
+    // Try to fetch model to see if it exists
+    const response = await fetch('/models/vocals.onnx', { method: 'HEAD' })
+    if (response.ok) {
+      onnxModelStatus.value.available = true
+      console.log('✅ ONNX model available at /models/vocals.onnx')
+    } else {
+      console.log('ℹ️ ONNX model not found - using demo mode')
+    }
+  } catch (error) {
+    console.log('ℹ️ ONNX model not available - using demo mode')
+  }
+}
+
+async function loadONNXModel() {
+  if (onnxModelStatus.value.loading) return
+
+  onnxModelStatus.value.loading = true
+  onnxModelStatus.value.error = null
+
+  try {
+    await onnxStemSeparator.initialize((progress) => {
+      progressInfo.value = progress
+    })
+
+    await onnxStemSeparator.loadModels(
+      '/models/vocals.onnx',
+      null, // instrumental will be derived
+      (progress) => {
+        progressInfo.value = progress
+      }
+    )
+
+    onnxModelStatus.value.available = true
+    alert('✅ AI model loaded successfully!')
+  } catch (error) {
+    onnxModelStatus.value.error = error.message
+    alert(`❌ Failed to load AI model: ${error.message}\n\nFalling back to demo mode.`)
+  } finally {
+    onnxModelStatus.value.loading = false
+  }
+}
 
 async function startSeparation() {
   if (!selectedTrack.value) return
@@ -197,7 +270,6 @@ async function startSeparation() {
 
   try {
     // Get the track's audio buffer from the first clip
-    // (In the future, we might want to merge all clips)
     if (!selectedTrack.value.clips || selectedTrack.value.clips.length === 0) {
       throw new Error('Track has no audio clips')
     }
@@ -216,13 +288,26 @@ async function startSeparation() {
 
     console.log(`📊 Processing audio: ${trackBuffer.duration.toFixed(2)}s, ${trackBuffer.sampleRate}Hz, ${trackBuffer.numberOfChannels} channels`)
 
-    // Separate stems
-    const result = await stemSeparator.separate(trackBuffer, (progress) => {
-      progressInfo.value = progress
-    })
+    // Choose separator based on availability
+    let result
+    if (onnxModelStatus.value.available && onnxStemSeparator.vocalsSession) {
+      console.log('🤖 Using ONNX AI model')
+      result = await onnxStemSeparator.separate(trackBuffer, (progress) => {
+        progressInfo.value = progress
+      })
+    } else {
+      console.log('🎛️ Using demo mode (frequency filters)')
+      result = await stemSeparator.separate(trackBuffer, (progress) => {
+        progressInfo.value = progress
+      })
+    }
 
     stems.value = result
     console.log('✅ Stems separated successfully')
+
+    // Show success message
+    const mode = onnxModelStatus.value.available ? 'AI model' : 'demo mode'
+    alert(`✅ Stems separated successfully using ${mode}!\n\nUse the "Add as Track" buttons below to add them to your project.`)
 
   } catch (error) {
     console.error('Failed to separate stems:', error)
@@ -235,13 +320,22 @@ async function startSeparation() {
 function addStemAsTrack(stemType) {
   if (!stems.value) return
 
-  const buffer = stems.value[stemType]
-  const trackName = `${selectedTrack.value.name} - ${stemType.charAt(0).toUpperCase() + stemType.slice(1)}`
+  try {
+    const buffer = stems.value[stemType]
+    const trackName = `${selectedTrack.value.name} - ${stemType.charAt(0).toUpperCase() + stemType.slice(1)}`
 
-  const track = audioStore.addTrack(trackName)
-  audioStore.addClipToTrack(track.id, buffer, 0, trackName)
+    // Add track and clip
+    const track = audioStore.addTrack(trackName)
+    audioStore.addClipToTrack(track.id, buffer, 0, trackName)
 
-  console.log(`Added ${stemType} stem as new track`)
+    console.log(`✅ Added ${stemType} stem as new track`)
+
+    // Give user feedback
+    alert(`✅ ${trackName} added to timeline!`)
+  } catch (error) {
+    console.error(`Failed to add ${stemType} stem:`, error)
+    alert(`Failed to add ${stemType} stem: ` + error.message)
+  }
 }
 
 async function downloadStem(stemType) {

@@ -204,7 +204,10 @@ export class StemSeparator {
     }
 
     // Apply ML-inspired separation using spectral masking
-    const [vocalsSpec, instrumentalSpec] = tf.tidy(() => {
+    // Keep magnitude and phase separate to avoid complex64 operations (WebGL compatibility)
+    const [vocalsMag, vocalsPhase, instrumentalMag, instrumentalPhase] = tf.tidy(() => {
+      // Extract magnitude and phase from complex spectrogram
+      // Note: tf.abs, tf.atan2, tf.real, tf.imag are supported operations
       const magnitude = tf.abs(spectrogram)
       const phase = tf.atan2(tf.imag(spectrogram), tf.real(spectrogram))
 
@@ -230,30 +233,30 @@ export class StemSeparator {
       const instrumentalMask = tf.sub(1, tf.mul(combinedVocalsMask, 0.8)) // 0.8 to prevent over-subtraction
       const instrumentalMagnitude = tf.mul(magnitude, instrumentalMask)
 
-      // Reconstruct complex spectrograms
-      const vocalsSpec = this.magnitudePhaseToComplex(vocalsMagnitude, phase)
-      const instrumentalSpec = this.magnitudePhaseToComplex(instrumentalMagnitude, phase)
-
-      return [vocalsSpec, instrumentalSpec]
+      // Return magnitude and phase separately (NOT as complex tensors)
+      // We'll reconstruct complex values during inverse FFT
+      return [vocalsMagnitude, phase, instrumentalMagnitude, phase]
     })
 
     if (onProgress) {
       onProgress({ status: 'processing', message: 'Reconstructing vocals...', progress: 70 })
     }
 
-    // Convert back to audio
-    const vocals = await this.spectrogramToAudio(vocalsSpec, buffer.sampleRate, buffer.numberOfChannels)
+    // Convert back to audio - pass magnitude and phase separately
+    const vocals = await this.magnitudePhaseToAudio(vocalsMag, vocalsPhase, buffer.sampleRate, buffer.numberOfChannels)
 
     if (onProgress) {
       onProgress({ status: 'processing', message: 'Reconstructing instrumental...', progress: 85 })
     }
 
-    const instrumental = await this.spectrogramToAudio(instrumentalSpec, buffer.sampleRate, buffer.numberOfChannels)
+    const instrumental = await this.magnitudePhaseToAudio(instrumentalMag, instrumentalPhase, buffer.sampleRate, buffer.numberOfChannels)
 
     // Cleanup tensors
     spectrogram.dispose()
-    vocalsSpec.dispose()
-    instrumentalSpec.dispose()
+    vocalsMag.dispose()
+    vocalsPhase.dispose()
+    instrumentalMag.dispose()
+    instrumentalPhase.dispose()
 
     const processingTime = ((performance.now() - startTime) / 1000).toFixed(1)
     console.log(`✅ Enhanced ML separation completed in ${processingTime}s`)
@@ -361,6 +364,130 @@ export class StemSeparator {
   }
 
   /**
+   * Convert magnitude and phase spectrograms to audio (WebGL-compatible)
+   * This avoids creating complex64 tensors that WebGL can't handle
+   */
+  async magnitudePhaseToAudio(magnitude, phase, sampleRate, numChannels) {
+    const { fftSize, hopLength } = this.modelConfig
+
+    // Validate inputs
+    if (!magnitude || !magnitude.shape) {
+      throw new Error('Magnitude spectrogram is null or has no shape')
+    }
+    if (!phase || !phase.shape) {
+      throw new Error('Phase spectrogram is null or has no shape')
+    }
+
+    console.log(`🔄 Converting magnitude/phase to audio: magnitude shape=[${magnitude.shape.join(', ')}]`)
+
+    const freqBins = magnitude.shape[0]
+    const numFrames = magnitude.shape[1]
+
+    console.log(`   Freq bins: ${freqBins}, Frames: ${numFrames}`)
+    console.log(`   Memory before processing:`, tf.memory())
+
+    if (numFrames <= 0 || numFrames > 1000000) {
+      throw new Error(`Invalid number of frames: ${numFrames}`)
+    }
+
+    const audioLength = (numFrames - 1) * hopLength + fftSize
+
+    console.log(`   Audio length: ${audioLength} samples`)
+
+    if (audioLength <= 0 || !isFinite(audioLength) || audioLength > 100000000) {
+      throw new Error(`Invalid audio length: ${audioLength}`)
+    }
+
+    // Initialize output audio
+    const audioArray = new Float32Array(audioLength)
+    const windowSumArray = new Float32Array(audioLength)
+
+    // Create window tensor ONCE and reuse (CRITICAL FIX - was creating 7749+ times!)
+    const windowTensor = tf.tensor1d(this.window)
+    const windowData = windowTensor.dataSync()
+
+    console.log(`   Reconstructing ${numFrames} frames...`)
+
+    try {
+      // Inverse FFT for each frame with periodic async breaks
+      for (let i = 0; i < numFrames; i++) {
+        // Give browser a break every 100 frames to prevent lockup
+        if (i > 0 && i % 100 === 0) {
+          console.log(`   Progress: ${i}/${numFrames} frames (${((i/numFrames)*100).toFixed(1)}%)`)
+          console.log(`   Memory:`, tf.memory())
+
+          // Let browser breathe
+          await new Promise(resolve => setTimeout(resolve, 0))
+
+          // Cleanup memory periodically
+          if (i % 500 === 0) {
+            tf.engine().startScope()
+            tf.engine().endScope()
+          }
+        }
+
+        // Extract magnitude and phase for this frame
+        const frameMag = magnitude.slice([0, i], [-1, 1]).squeeze()
+        const framePhase = phase.slice([0, i], [-1, 1]).squeeze()
+
+        // Reconstruct complex frame from magnitude and phase
+        // Only create complex tensor right before irfft (where it's needed)
+        const real = tf.mul(frameMag, tf.cos(framePhase))
+        const imag = tf.mul(frameMag, tf.sin(framePhase))
+        const frameComplex = tf.complex(real, imag)
+
+        // Inverse FFT
+        const ifft = tf.spectral.irfft(frameComplex)
+        const windowedFrame = tf.mul(ifft, windowTensor)
+
+        // Get data synchronously
+        const frameData = windowedFrame.dataSync()
+
+        // Overlap-add
+        const start = i * hopLength
+        for (let j = 0; j < fftSize && start + j < audioLength; j++) {
+          audioArray[start + j] += frameData[j]
+          windowSumArray[start + j] += windowData[j]
+        }
+
+        // Clean up tensors immediately
+        frameMag.dispose()
+        framePhase.dispose()
+        real.dispose()
+        imag.dispose()
+        frameComplex.dispose()
+        ifft.dispose()
+        windowedFrame.dispose()
+      }
+    } finally {
+      // Always cleanup window tensor
+      windowTensor.dispose()
+    }
+
+    // Normalize by window sum
+    for (let i = 0; i < audioLength; i++) {
+      const sum = windowSumArray[i]
+      audioArray[i] = sum > 1e-8 ? audioArray[i] / sum : 0
+    }
+
+    console.log(`   Creating AudioBuffer: ${numChannels} channels, ${audioLength} samples, ${sampleRate}Hz`)
+    console.log(`   Memory after processing:`, tf.memory())
+
+    // Create AudioBuffer
+    const audioContext = new AudioContext({ sampleRate })
+    const audioBuffer = audioContext.createBuffer(numChannels, audioLength, sampleRate)
+
+    // Fill channels
+    for (let ch = 0; ch < numChannels; ch++) {
+      audioBuffer.copyToChannel(audioArray, ch)
+    }
+
+    console.log(`✅ Audio reconstruction complete: ${audioBuffer.duration.toFixed(2)}s`)
+
+    return audioBuffer
+  }
+
+  /**
    * Compute Short-Time Fourier Transform (STFT)
    */
   async computeSpectrogram(audio, sampleRate) {
@@ -379,18 +506,32 @@ export class StemSeparator {
     }
 
     console.log(`🔬 Computing spectrogram: ${audio.length} samples → ${numFrames} frames`)
+    console.log(`   Memory before STFT:`, tf.memory())
 
     // Don't use tf.tidy here because we need precise control over tensor lifecycle
     const audioTensor = tf.tensor1d(audio)
     const spectrogramData = []
 
+    // Create window tensor ONCE and reuse (CRITICAL FIX - was creating 7749+ times!)
+    const windowTensor = tf.tensor1d(this.window)
+
     try {
       for (let i = 0; i < numFrames; i++) {
+        // Give browser a break every 100 frames to prevent lockup
+        if (i > 0 && i % 100 === 0) {
+          console.log(`   STFT Progress: ${i}/${numFrames} frames (${((i/numFrames)*100).toFixed(1)}%)`)
+          await new Promise(resolve => setTimeout(resolve, 0))
+
+          // Periodic memory cleanup
+          if (i % 500 === 0) {
+            console.log(`   Memory:`, tf.memory())
+          }
+        }
+
         const start = i * hopLength
         const frame = audioTensor.slice(start, fftSize)
 
-        // Apply window
-        const windowTensor = tf.tensor1d(this.window)
+        // Apply window (reuse windowTensor!)
         const windowedFrame = tf.mul(frame, windowTensor)
 
         // Compute FFT - keep the result
@@ -399,9 +540,10 @@ export class StemSeparator {
 
         // Cleanup intermediate tensors only
         frame.dispose()
-        windowTensor.dispose()
         windowedFrame.dispose()
       }
+
+      console.log(`   Stacking ${numFrames} frames into spectrogram...`)
 
       // Stack all frames into a 2D tensor
       // tf.stack with axis=0 creates shape [numFrames, freqBins]
@@ -414,6 +556,7 @@ export class StemSeparator {
 
       // Verify shape is correct
       console.log(`📊 Spectrogram shape: [${spectrogram.shape.join(', ')}] (expected: [${this.modelConfig.numFreqBins}, ${numFrames}])`)
+      console.log(`   Memory after STFT:`, tf.memory())
 
       if (spectrogram.shape[0] !== this.modelConfig.numFreqBins || spectrogram.shape[1] !== numFrames) {
         throw new Error(`Invalid spectrogram shape: [${spectrogram.shape.join(', ')}]`)
@@ -423,6 +566,7 @@ export class StemSeparator {
     } finally {
       // Cleanup
       audioTensor.dispose()
+      windowTensor.dispose()
       spectrogramData.forEach(s => s.dispose())
     }
   }
