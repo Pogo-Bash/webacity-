@@ -1,10 +1,11 @@
 /**
  * ONNX-based Stem Separation Service
  * Uses UVR MDX-NET models with ONNX Runtime Web
- * MDX-NET models expect spectrogram input, not raw audio
+ * Uses TensorFlow.js for fast STFT/ISTFT processing
  */
 
 import * as ort from 'onnxruntime-web'
+import * as tf from '@tensorflow/tfjs'
 
 export class ONNXStemSeparator {
   constructor() {
@@ -12,7 +13,6 @@ export class ONNXStemSeparator {
     this.instrumentalSession = null
     this.initialized = false
     this.sampleRate = 44100
-    this.window = null
 
     // MDX-NET model configuration
     this.config = {
@@ -40,15 +40,13 @@ export class ONNXStemSeparator {
       ort.env.wasm.simd = true
       ort.env.wasm.proxy = false
 
-      console.log(`✅ ONNX Runtime initialized with WASM backend`)
-      console.log(`   Threads: ${ort.env.wasm.numThreads}`)
+      // Initialize TensorFlow.js backend
+      await tf.ready()
+      await tf.setBackend('webgl')
 
-      // Pre-compute Hann window for STFT
-      const { n_fft } = this.config
-      this.window = new Float32Array(n_fft)
-      for (let i = 0; i < n_fft; i++) {
-        this.window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n_fft - 1)))
-      }
+      console.log(`✅ ONNX Runtime initialized with WASM backend`)
+      console.log(`   ONNX Threads: ${ort.env.wasm.numThreads}`)
+      console.log(`✅ TensorFlow.js backend: ${tf.getBackend()}`)
 
       if (onProgress) {
         onProgress({ status: 'ready', message: 'ONNX Runtime ready', progress: 100 })
@@ -137,144 +135,121 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Simple FFT implementation (real input -> complex output)
-   * Returns [real[], imag[]]
-   */
-  fft(signal, outputSize) {
-    const N = signal.length
-    const real = new Float32Array(outputSize)
-    const imag = new Float32Array(outputSize)
-
-    // DFT (slow but works, can be replaced with proper FFT)
-    for (let k = 0; k < outputSize; k++) {
-      let sumReal = 0
-      let sumImag = 0
-      for (let n = 0; n < N; n++) {
-        const angle = (-2 * Math.PI * k * n) / N
-        sumReal += signal[n] * Math.cos(angle)
-        sumImag += signal[n] * Math.sin(angle)
-      }
-      real[k] = sumReal
-      imag[k] = sumImag
-    }
-
-    return [real, imag]
-  }
-
-  /**
-   * Inverse FFT (complex input -> real output)
-   */
-  ifft(real, imag) {
-    const N = real.length
-    const signal = new Float32Array(N)
-
-    // IDFT
-    for (let n = 0; n < N; n++) {
-      let sum = 0
-      for (let k = 0; k < N; k++) {
-        const angle = (2 * Math.PI * k * n) / N
-        sum += real[k] * Math.cos(angle) - imag[k] * Math.sin(angle)
-      }
-      signal[n] = sum / N
-    }
-
-    return signal
-  }
-
-  /**
-   * STFT: Convert audio to spectrogram
-   * Returns [magnitude, phase] where magnitude[freq][time]
+   * STFT using TensorFlow.js (fast GPU implementation)
+   * Returns [magnitude, phase]
    */
   stft(audio) {
-    const { n_fft, hop_length } = this.config
-    const numFrames = Math.floor((audio.length - n_fft) / hop_length) + 1
-    const freqBins = Math.floor(n_fft / 2) + 1
+    return tf.tidy(() => {
+      const { n_fft, hop_length } = this.config
 
-    const magnitude = []
-    const phase = []
+      // Convert to tensor
+      const audioTensor = tf.tensor1d(audio)
 
-    for (let t = 0; t < numFrames; t++) {
-      const start = t * hop_length
-      const frame = new Float32Array(n_fft)
+      // Compute STFT
+      const stftTensor = tf.signal.stft(
+        audioTensor,
+        n_fft,
+        hop_length,
+        n_fft,
+        tf.signal.hannWindow
+      )
 
-      // Apply window
-      for (let i = 0; i < n_fft && start + i < audio.length; i++) {
-        frame[i] = audio[start + i] * this.window[i]
+      // Split into magnitude and phase
+      const magnitude = tf.abs(stftTensor)
+      const phase = tf.atan2(tf.imag(stftTensor), tf.real(stftTensor))
+
+      // Get data as arrays [freq, time]
+      const magData = magnitude.arraySync()
+      const phaseData = phase.arraySync()
+
+      // Transpose to [time, freq] for easier processing
+      const numFrames = magData[0].length
+      const freqBins = magData.length
+
+      const magTransposed = []
+      const phaseTransposed = []
+
+      for (let t = 0; t < numFrames; t++) {
+        const magFrame = new Float32Array(freqBins)
+        const phaseFrame = new Float32Array(freqBins)
+        for (let f = 0; f < freqBins; f++) {
+          magFrame[f] = magData[f][t]
+          phaseFrame[f] = phaseData[f][t]
+        }
+        magTransposed.push(magFrame)
+        phaseTransposed.push(phaseFrame)
       }
 
-      // FFT
-      const [real, imag] = this.fft(frame, freqBins)
-
-      // Convert to magnitude and phase
-      const frameMag = new Float32Array(freqBins)
-      const framePhase = new Float32Array(freqBins)
-
-      for (let f = 0; f < freqBins; f++) {
-        frameMag[f] = Math.sqrt(real[f] * real[f] + imag[f] * imag[f])
-        framePhase[f] = Math.atan2(imag[f], real[f])
-      }
-
-      magnitude.push(frameMag)
-      phase.push(framePhase)
-    }
-
-    return [magnitude, phase]
+      return [magTransposed, phaseTransposed]
+    })
   }
 
   /**
-   * ISTFT: Convert spectrogram back to audio
+   * ISTFT using TensorFlow.js (fast GPU implementation)
    */
   istft(magnitude, phase, originalLength) {
-    const { n_fft, hop_length } = this.config
-    const numFrames = magnitude.length
-    const audioLength = (numFrames - 1) * hop_length + n_fft
+    return tf.tidy(() => {
+      const { n_fft, hop_length } = this.config
 
-    const audio = new Float32Array(Math.max(audioLength, originalLength))
-    const window_sum = new Float32Array(audio.length)
+      const numFrames = magnitude.length
+      const freqBins = magnitude[0].length
 
-    for (let t = 0; t < numFrames; t++) {
-      const start = t * hop_length
-      const freqBins = magnitude[t].length
-
-      // Convert magnitude/phase to complex
-      const real = new Float32Array(freqBins)
-      const imag = new Float32Array(freqBins)
+      // Transpose back to [freq, time]
+      const magArray = []
+      const phaseArray = []
 
       for (let f = 0; f < freqBins; f++) {
-        real[f] = magnitude[t][f] * Math.cos(phase[t][f])
-        imag[f] = magnitude[t][f] * Math.sin(phase[t][f])
+        const magFreq = []
+        const phaseFreq = []
+        for (let t = 0; t < numFrames; t++) {
+          magFreq.push(magnitude[t][f])
+          phaseFreq.push(phase[t][f])
+        }
+        magArray.push(magFreq)
+        phaseArray.push(phaseFreq)
       }
 
-      // IFFT
-      const frame = this.ifft(real, imag)
+      // Create complex tensor from magnitude and phase
+      const magTensor = tf.tensor2d(magArray)
+      const phaseTensor = tf.tensor2d(phaseArray)
 
-      // Overlap-add with window
-      for (let i = 0; i < n_fft && start + i < audio.length; i++) {
-        audio[start + i] += frame[i] * this.window[i]
-        window_sum[start + i] += this.window[i] * this.window[i]
+      const realPart = tf.mul(magTensor, tf.cos(phaseTensor))
+      const imagPart = tf.mul(magTensor, tf.sin(phaseTensor))
+
+      const stftComplex = tf.complex(realPart, imagPart)
+
+      // Inverse STFT
+      const audioTensor = tf.signal.inverseStft(
+        stftComplex,
+        n_fft,
+        hop_length,
+        n_fft,
+        tf.signal.hannWindow
+      )
+
+      // Get audio data
+      const audioData = audioTensor.arraySync()
+
+      // Trim to original length
+      const result = new Float32Array(originalLength)
+      for (let i = 0; i < Math.min(originalLength, audioData.length); i++) {
+        result[i] = audioData[i]
       }
-    }
 
-    // Normalize
-    for (let i = 0; i < audio.length; i++) {
-      if (window_sum[i] > 1e-8) {
-        audio[i] /= window_sum[i]
-      }
-    }
-
-    return audio.slice(0, originalLength)
+      return result
+    })
   }
 
   /**
-   * Process audio chunk through ONNX model
-   * Input: magnitude spectrogram
-   * Output: magnitude spectrogram
+   * Process spectrogram through ONNX model
    */
   async processSpectrogram(magnitude) {
     try {
       const { dim_f } = this.config
       const numFrames = magnitude.length
       const freqBins = magnitude[0].length
+
+      console.log(`   Processing spectrogram: ${freqBins} freq bins × ${numFrames} time frames`)
 
       // Prepare input tensor [batch, channels, freq, time]
       // Reshape to [1, 1, dim_f, numFrames]
@@ -288,6 +263,8 @@ export class ONNXStemSeparator {
 
       const inputTensor = new ort.Tensor('float32', inputData, [1, 1, dim_f, numFrames])
 
+      console.log(`   Input tensor shape: [1, 1, ${dim_f}, ${numFrames}]`)
+
       // Run model
       const feeds = { [this.vocalsSession.inputNames[0]]: inputTensor }
       const results = await this.vocalsSession.run(feeds)
@@ -295,6 +272,9 @@ export class ONNXStemSeparator {
       // Get output
       const outputTensor = results[this.vocalsSession.outputNames[0]]
       const outputData = outputTensor.data
+
+      console.log(`   Output tensor shape:`, outputTensor.dims)
+      console.log(`   Output data length:`, outputData.length)
 
       // Reshape back to [time][freq]
       const outputMagnitude = []
@@ -326,6 +306,7 @@ export class ONNXStemSeparator {
     }
 
     try {
+      const startTime = performance.now()
       console.log(`🎵 Separating ${audioBuffer.duration.toFixed(2)}s audio...`)
 
       if (onProgress) {
@@ -334,28 +315,30 @@ export class ONNXStemSeparator {
 
       // Convert to mono
       const mono = this.audioBufferToMono(audioBuffer)
+      console.log(`   Mono audio: ${mono.length} samples`)
 
       if (onProgress) {
         onProgress({ status: 'processing', message: 'Computing spectrogram...', progress: 20 })
       }
 
-      // STFT
+      // STFT with TensorFlow.js (fast!)
       const [magnitude, phase] = this.stft(mono)
-      console.log(`   Spectrogram: ${magnitude[0].length} freq bins × ${magnitude.length} time frames`)
+      console.log(`   Spectrogram computed: ${magnitude[0].length} freq bins × ${magnitude.length} frames`)
 
       if (onProgress) {
         onProgress({ status: 'processing', message: 'Running AI model...', progress: 40 })
       }
 
-      // Process through model
+      // Process through ONNX model
       const vocalsMagnitude = await this.processSpectrogram(magnitude)
 
       if (onProgress) {
         onProgress({ status: 'processing', message: 'Reconstructing audio...', progress: 70 })
       }
 
-      // ISTFT with original phase
+      // ISTFT with TensorFlow.js (fast!)
       const vocals = this.istft(vocalsMagnitude, phase, mono.length)
+      console.log(`   Vocals reconstructed: ${vocals.length} samples`)
 
       if (onProgress) {
         onProgress({ status: 'processing', message: 'Creating instrumental...', progress: 85 })
@@ -371,11 +354,12 @@ export class ONNXStemSeparator {
       const vocalsBuffer = this.float32ToAudioBuffer(vocals, audioBuffer.sampleRate, audioBuffer.numberOfChannels)
       const instrumentalBuffer = this.float32ToAudioBuffer(instrumental, audioBuffer.sampleRate, audioBuffer.numberOfChannels)
 
+      const processingTime = ((performance.now() - startTime) / 1000).toFixed(1)
+      console.log(`✅ Stem separation complete in ${processingTime}s!`)
+
       if (onProgress) {
         onProgress({ status: 'complete', message: 'Separation complete!', progress: 100 })
       }
-
-      console.log(`✅ Stem separation complete!`)
 
       return { vocals: vocalsBuffer, instrumental: instrumentalBuffer }
     } catch (error) {
@@ -425,7 +409,7 @@ export class ONNXStemSeparator {
     return {
       initialized: this.initialized,
       vocalsModelLoaded: !!this.vocalsSession,
-      backend: 'WASM',
+      backend: 'WASM + TensorFlow.js WebGL',
       onnxVersion: ort.env.versions.onnxruntime
     }
   }
