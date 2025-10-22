@@ -1,7 +1,7 @@
 /**
  * ONNX-based Stem Separation Service
- * Uses UVR MDX-NET models with ONNX Runtime Web + WebGPU
- * Memory-optimized for browser use without crashes
+ * Uses UVR MDX-NET models with ONNX Runtime Web
+ * MDX-NET models expect spectrogram input, not raw audio
  */
 
 import * as ort from 'onnxruntime-web'
@@ -12,28 +12,20 @@ export class ONNXStemSeparator {
     this.instrumentalSession = null
     this.initialized = false
     this.sampleRate = 44100
+    this.window = null
 
-    // Model configuration for UVR MDX-NET
+    // MDX-NET model configuration
     this.config = {
-      // Processing parameters
-      chunkSize: 262144, // ~6 seconds at 44.1kHz (power of 2 for FFT)
-      overlap: 0.25, // 25% overlap between chunks
-      hopLength: 1024,
       n_fft: 6144,
-      dimF: 3072,
-
-      // Model URLs (user must provide these)
-      vocalsModelUrl: null,
-      instrumentalModelUrl: null,
-
-      // Memory limits
-      maxMemoryMB: 512, // Stay under 512MB to prevent crashes
-      batchSize: 1
+      hop_length: 1024,
+      dim_f: 3072,
+      chunk_size: 485100, // ~11 seconds at 44.1kHz
+      overlap: 0.25
     }
   }
 
   /**
-   * Initialize ONNX Runtime with WebGPU
+   * Initialize ONNX Runtime with WASM backend
    */
   async initialize(onProgress = null) {
     if (this.initialized) return true
@@ -43,22 +35,23 @@ export class ONNXStemSeparator {
         onProgress({ status: 'loading', message: 'Initializing ONNX Runtime...', progress: 10 })
       }
 
-      // Configure ONNX Runtime for browser with WASM backend
-      // Using WASM for maximum compatibility (avoids WebGPU shader issues)
+      // Configure ONNX Runtime with WASM (stable, no shader issues)
       ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4
       ort.env.wasm.simd = true
       ort.env.wasm.proxy = false
 
       console.log(`✅ ONNX Runtime initialized with WASM backend`)
       console.log(`   Threads: ${ort.env.wasm.numThreads}`)
-      console.log(`   SIMD: ${ort.env.wasm.simd}`)
+
+      // Pre-compute Hann window for STFT
+      const { n_fft } = this.config
+      this.window = new Float32Array(n_fft)
+      for (let i = 0; i < n_fft; i++) {
+        this.window[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n_fft - 1)))
+      }
 
       if (onProgress) {
-        onProgress({
-          status: 'ready',
-          message: 'ONNX Runtime ready - Models need to be loaded',
-          progress: 100
-        })
+        onProgress({ status: 'ready', message: 'ONNX Runtime ready', progress: 100 })
       }
 
       this.initialized = true
@@ -70,25 +63,18 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Load ONNX model from URL with progress tracking
+   * Load ONNX model with WASM backend
    */
   async loadModel(modelUrl, modelType, onProgress = null) {
     try {
       if (onProgress) {
-        onProgress({
-          status: 'loading',
-          message: `Downloading ${modelType} model...`,
-          progress: 20
-        })
+        onProgress({ status: 'loading', message: `Loading ${modelType} model...`, progress: 20 })
       }
 
       console.log(`📥 Loading ${modelType} model from: ${modelUrl}`)
 
-      // Use WASM backend for maximum compatibility
-      // WebGPU can cause shader compilation issues on some GPUs
-      console.log('🔧 Loading model with WASM backend (stable, works on all browsers)')
-
-      const wasmOptions = {
+      // Use WASM backend (no WebGPU shader issues)
+      const options = {
         executionProviders: ['wasm'],
         graphOptimizationLevel: 'all',
         enableCpuMemArena: true,
@@ -96,12 +82,14 @@ export class ONNXStemSeparator {
         executionMode: 'sequential'
       }
 
-      const session = await ort.InferenceSession.create(modelUrl, wasmOptions)
-      console.log(`✅ ${modelType} model loaded successfully with WASM backend`)
-
+      const session = await ort.InferenceSession.create(modelUrl, options)
       console.log(`✅ ${modelType} model loaded successfully`)
-      console.log(`   Input names:`, session.inputNames)
-      console.log(`   Output names:`, session.outputNames)
+      console.log(`   Inputs:`, session.inputNames)
+      console.log(`   Outputs:`, session.outputNames)
+
+      if (onProgress) {
+        onProgress({ status: 'ready', message: `${modelType} model loaded`, progress: 100 })
+      }
 
       return session
     } catch (error) {
@@ -111,31 +99,20 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Load models from provided URLs
+   * Load models from URLs
    */
   async loadModels(vocalsModelUrl, instrumentalModelUrl = null, onProgress = null) {
-    if (!vocalsModelUrl) {
-      throw new Error('Vocals model URL is required')
-    }
-
-    this.config.vocalsModelUrl = vocalsModelUrl
-    this.config.instrumentalModelUrl = instrumentalModelUrl
-
     try {
+      if (!vocalsModelUrl) {
+        throw new Error('Vocals model URL is required')
+      }
+
       // Load vocals model
       this.vocalsSession = await this.loadModel(vocalsModelUrl, 'vocals', onProgress)
 
-      // Load instrumental model if provided (optional - we can subtract vocals from original)
+      // Instrumental model is optional (we can derive it)
       if (instrumentalModelUrl) {
         this.instrumentalSession = await this.loadModel(instrumentalModelUrl, 'instrumental', onProgress)
-      }
-
-      if (onProgress) {
-        onProgress({
-          status: 'ready',
-          message: 'Models loaded successfully',
-          progress: 100
-        })
       }
 
       return true
@@ -145,7 +122,7 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Convert AudioBuffer to Float32Array (mono)
+   * Convert AudioBuffer to mono Float32Array
    */
   audioBufferToMono(buffer) {
     const left = buffer.getChannelData(0)
@@ -160,73 +137,158 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Process audio in chunks with memory management
+   * Simple FFT implementation (real input -> complex output)
+   * Returns [real[], imag[]]
    */
-  async separateChunked(audioData, sampleRate, onProgress = null) {
-    const { chunkSize, overlap } = this.config
-    const hopSize = Math.floor(chunkSize * (1 - overlap))
-    const numChunks = Math.ceil((audioData.length - chunkSize) / hopSize) + 1
+  fft(signal, outputSize) {
+    const N = signal.length
+    const real = new Float32Array(outputSize)
+    const imag = new Float32Array(outputSize)
 
-    console.log(`📊 Processing ${audioData.length} samples in ${numChunks} chunks`)
-    console.log(`   Chunk size: ${chunkSize} samples (~${(chunkSize / sampleRate).toFixed(1)}s)`)
-    console.log(`   Overlap: ${(overlap * 100)}%`)
-
-    const vocalsChunks = []
-    let processedSamples = 0
-
-    for (let i = 0; i < numChunks; i++) {
-      const start = i * hopSize
-      const end = Math.min(start + chunkSize, audioData.length)
-      const chunk = audioData.slice(start, end)
-
-      if (onProgress && i % 5 === 0) {
-        const progress = 40 + ((i / numChunks) * 40)
-        onProgress({
-          status: 'processing',
-          message: `Processing chunk ${i + 1}/${numChunks}...`,
-          progress
-        })
+    // DFT (slow but works, can be replaced with proper FFT)
+    for (let k = 0; k < outputSize; k++) {
+      let sumReal = 0
+      let sumImag = 0
+      for (let n = 0; n < N; n++) {
+        const angle = (-2 * Math.PI * k * n) / N
+        sumReal += signal[n] * Math.cos(angle)
+        sumImag += signal[n] * Math.sin(angle)
       }
-
-      // Pad chunk if needed
-      const paddedChunk = new Float32Array(chunkSize)
-      paddedChunk.set(chunk)
-
-      // Process with ONNX model
-      const vocalChunk = await this.processChunk(paddedChunk)
-      vocalsChunks.push(vocalChunk)
-
-      processedSamples = end
-
-      // Give browser a break every 10 chunks
-      if (i % 10 === 0 && i > 0) {
-        await new Promise(resolve => setTimeout(resolve, 0))
-      }
+      real[k] = sumReal
+      imag[k] = sumImag
     }
 
-    // Reconstruct full audio with overlap-add
-    if (onProgress) {
-      onProgress({
-        status: 'processing',
-        message: 'Reconstructing full audio...',
-        progress: 85
-      })
-    }
-
-    const vocals = this.overlapAdd(vocalsChunks, hopSize, audioData.length)
-
-    return vocals
+    return [real, imag]
   }
 
   /**
-   * Process single audio chunk through ONNX model
+   * Inverse FFT (complex input -> real output)
    */
-  async processChunk(chunk) {
-    try {
-      // Prepare input tensor [batch, channels, samples]
-      const inputTensor = new ort.Tensor('float32', chunk, [1, 1, chunk.length])
+  ifft(real, imag) {
+    const N = real.length
+    const signal = new Float32Array(N)
 
-      // Run inference
+    // IDFT
+    for (let n = 0; n < N; n++) {
+      let sum = 0
+      for (let k = 0; k < N; k++) {
+        const angle = (2 * Math.PI * k * n) / N
+        sum += real[k] * Math.cos(angle) - imag[k] * Math.sin(angle)
+      }
+      signal[n] = sum / N
+    }
+
+    return signal
+  }
+
+  /**
+   * STFT: Convert audio to spectrogram
+   * Returns [magnitude, phase] where magnitude[freq][time]
+   */
+  stft(audio) {
+    const { n_fft, hop_length } = this.config
+    const numFrames = Math.floor((audio.length - n_fft) / hop_length) + 1
+    const freqBins = Math.floor(n_fft / 2) + 1
+
+    const magnitude = []
+    const phase = []
+
+    for (let t = 0; t < numFrames; t++) {
+      const start = t * hop_length
+      const frame = new Float32Array(n_fft)
+
+      // Apply window
+      for (let i = 0; i < n_fft && start + i < audio.length; i++) {
+        frame[i] = audio[start + i] * this.window[i]
+      }
+
+      // FFT
+      const [real, imag] = this.fft(frame, freqBins)
+
+      // Convert to magnitude and phase
+      const frameMag = new Float32Array(freqBins)
+      const framePhase = new Float32Array(freqBins)
+
+      for (let f = 0; f < freqBins; f++) {
+        frameMag[f] = Math.sqrt(real[f] * real[f] + imag[f] * imag[f])
+        framePhase[f] = Math.atan2(imag[f], real[f])
+      }
+
+      magnitude.push(frameMag)
+      phase.push(framePhase)
+    }
+
+    return [magnitude, phase]
+  }
+
+  /**
+   * ISTFT: Convert spectrogram back to audio
+   */
+  istft(magnitude, phase, originalLength) {
+    const { n_fft, hop_length } = this.config
+    const numFrames = magnitude.length
+    const audioLength = (numFrames - 1) * hop_length + n_fft
+
+    const audio = new Float32Array(Math.max(audioLength, originalLength))
+    const window_sum = new Float32Array(audio.length)
+
+    for (let t = 0; t < numFrames; t++) {
+      const start = t * hop_length
+      const freqBins = magnitude[t].length
+
+      // Convert magnitude/phase to complex
+      const real = new Float32Array(freqBins)
+      const imag = new Float32Array(freqBins)
+
+      for (let f = 0; f < freqBins; f++) {
+        real[f] = magnitude[t][f] * Math.cos(phase[t][f])
+        imag[f] = magnitude[t][f] * Math.sin(phase[t][f])
+      }
+
+      // IFFT
+      const frame = this.ifft(real, imag)
+
+      // Overlap-add with window
+      for (let i = 0; i < n_fft && start + i < audio.length; i++) {
+        audio[start + i] += frame[i] * this.window[i]
+        window_sum[start + i] += this.window[i] * this.window[i]
+      }
+    }
+
+    // Normalize
+    for (let i = 0; i < audio.length; i++) {
+      if (window_sum[i] > 1e-8) {
+        audio[i] /= window_sum[i]
+      }
+    }
+
+    return audio.slice(0, originalLength)
+  }
+
+  /**
+   * Process audio chunk through ONNX model
+   * Input: magnitude spectrogram
+   * Output: magnitude spectrogram
+   */
+  async processSpectrogram(magnitude) {
+    try {
+      const { dim_f } = this.config
+      const numFrames = magnitude.length
+      const freqBins = magnitude[0].length
+
+      // Prepare input tensor [batch, channels, freq, time]
+      // Reshape to [1, 1, dim_f, numFrames]
+      const inputData = new Float32Array(dim_f * numFrames)
+
+      for (let t = 0; t < numFrames; t++) {
+        for (let f = 0; f < Math.min(freqBins, dim_f); f++) {
+          inputData[f * numFrames + t] = magnitude[t][f]
+        }
+      }
+
+      const inputTensor = new ort.Tensor('float32', inputData, [1, 1, dim_f, numFrames])
+
+      // Run model
       const feeds = { [this.vocalsSession.inputNames[0]]: inputTensor }
       const results = await this.vocalsSession.run(feeds)
 
@@ -234,55 +296,21 @@ export class ONNXStemSeparator {
       const outputTensor = results[this.vocalsSession.outputNames[0]]
       const outputData = outputTensor.data
 
-      // Convert to Float32Array
-      return new Float32Array(outputData)
+      // Reshape back to [time][freq]
+      const outputMagnitude = []
+      for (let t = 0; t < numFrames; t++) {
+        const frame = new Float32Array(freqBins)
+        for (let f = 0; f < Math.min(freqBins, dim_f); f++) {
+          frame[f] = outputData[f * numFrames + t]
+        }
+        outputMagnitude.push(frame)
+      }
+
+      return outputMagnitude
     } catch (error) {
-      console.error('❌ Chunk processing failed:', error)
-      // Return silence on error to prevent crash
-      return new Float32Array(chunk.length)
+      console.error('❌ Spectrogram processing failed:', error)
+      throw error
     }
-  }
-
-  /**
-   * Overlap-add reconstruction
-   */
-  overlapAdd(chunks, hopSize, totalLength) {
-    const output = new Float32Array(totalLength)
-    const windowSum = new Float32Array(totalLength)
-
-    for (let i = 0; i < chunks.length; i++) {
-      const start = i * hopSize
-      const chunk = chunks[i]
-
-      for (let j = 0; j < chunk.length && start + j < totalLength; j++) {
-        output[start + j] += chunk[j]
-        windowSum[start + j] += 1
-      }
-    }
-
-    // Normalize
-    for (let i = 0; i < totalLength; i++) {
-      if (windowSum[i] > 0) {
-        output[i] /= windowSum[i]
-      }
-    }
-
-    return output
-  }
-
-  /**
-   * Convert Float32Array to AudioBuffer
-   */
-  float32ToAudioBuffer(data, sampleRate, numChannels = 2) {
-    const audioContext = new AudioContext({ sampleRate })
-    const buffer = audioContext.createBuffer(numChannels, data.length, sampleRate)
-
-    // Fill both channels with same data
-    for (let ch = 0; ch < numChannels; ch++) {
-      buffer.copyToChannel(data, ch)
-    }
-
-    return buffer
   }
 
   /**
@@ -294,28 +322,46 @@ export class ONNXStemSeparator {
     }
 
     if (!this.vocalsSession) {
-      throw new Error('No model loaded. Please call loadModels() first.')
+      throw new Error('No model loaded. Call loadModels() first.')
     }
 
     try {
-      if (onProgress) {
-        onProgress({ status: 'preprocessing', message: 'Preparing audio...', progress: 10 })
-      }
+      console.log(`🎵 Separating ${audioBuffer.duration.toFixed(2)}s audio...`)
 
-      const startTime = performance.now()
+      if (onProgress) {
+        onProgress({ status: 'preprocessing', message: 'Converting to mono...', progress: 10 })
+      }
 
       // Convert to mono
       const mono = this.audioBufferToMono(audioBuffer)
-      console.log(`🎵 Input audio: ${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.sampleRate}Hz`)
 
-      // Process in chunks
-      const vocals = await this.separateChunked(mono, audioBuffer.sampleRate, onProgress)
-
-      // Create instrumental by subtraction
       if (onProgress) {
-        onProgress({ status: 'processing', message: 'Creating instrumental track...', progress: 90 })
+        onProgress({ status: 'processing', message: 'Computing spectrogram...', progress: 20 })
       }
 
+      // STFT
+      const [magnitude, phase] = this.stft(mono)
+      console.log(`   Spectrogram: ${magnitude[0].length} freq bins × ${magnitude.length} time frames`)
+
+      if (onProgress) {
+        onProgress({ status: 'processing', message: 'Running AI model...', progress: 40 })
+      }
+
+      // Process through model
+      const vocalsMagnitude = await this.processSpectrogram(magnitude)
+
+      if (onProgress) {
+        onProgress({ status: 'processing', message: 'Reconstructing audio...', progress: 70 })
+      }
+
+      // ISTFT with original phase
+      const vocals = this.istft(vocalsMagnitude, phase, mono.length)
+
+      if (onProgress) {
+        onProgress({ status: 'processing', message: 'Creating instrumental...', progress: 85 })
+      }
+
+      // Create instrumental by subtraction
       const instrumental = new Float32Array(mono.length)
       for (let i = 0; i < mono.length; i++) {
         instrumental[i] = mono[i] - vocals[i]
@@ -325,12 +371,11 @@ export class ONNXStemSeparator {
       const vocalsBuffer = this.float32ToAudioBuffer(vocals, audioBuffer.sampleRate, audioBuffer.numberOfChannels)
       const instrumentalBuffer = this.float32ToAudioBuffer(instrumental, audioBuffer.sampleRate, audioBuffer.numberOfChannels)
 
-      const processingTime = ((performance.now() - startTime) / 1000).toFixed(1)
-      console.log(`✅ ONNX stem separation completed in ${processingTime}s`)
-
       if (onProgress) {
         onProgress({ status: 'complete', message: 'Separation complete!', progress: 100 })
       }
+
+      console.log(`✅ Stem separation complete!`)
 
       return { vocals: vocalsBuffer, instrumental: instrumentalBuffer }
     } catch (error) {
@@ -340,7 +385,21 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Cleanup resources
+   * Convert Float32Array to AudioBuffer
+   */
+  float32ToAudioBuffer(data, sampleRate, numChannels = 2) {
+    const audioContext = new AudioContext({ sampleRate })
+    const buffer = audioContext.createBuffer(numChannels, data.length, sampleRate)
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      buffer.copyToChannel(data, ch)
+    }
+
+    return buffer
+  }
+
+  /**
+   * Cleanup
    */
   async dispose() {
     try {
@@ -360,18 +419,17 @@ export class ONNXStemSeparator {
   }
 
   /**
-   * Get status information
+   * Get status
    */
   getStatus() {
     return {
       initialized: this.initialized,
       vocalsModelLoaded: !!this.vocalsSession,
-      instrumentalModelLoaded: !!this.instrumentalSession,
-      backend: ort.env.webgpu.available ? 'WebGPU' : 'WASM',
+      backend: 'WASM',
       onnxVersion: ort.env.versions.onnxruntime
     }
   }
 }
 
-// Export singleton instance
+// Export singleton
 export const onnxStemSeparator = new ONNXStemSeparator()
