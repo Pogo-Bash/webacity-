@@ -539,7 +539,8 @@ export const useAudioStore = defineStore('audio', {
       if (!clipData) return false
 
       const historyStore = useHistoryStore()
-      const command = new DeleteClipCommand(this, this.selectedClipId)
+      // CRITICAL FIX: DeleteClipCommand requires trackId as second parameter
+      const command = new DeleteClipCommand(this, clipData.trackId, this.selectedClipId)
       historyStore.execute(command)
 
       this.selectedClipId = null

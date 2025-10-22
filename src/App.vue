@@ -296,11 +296,25 @@ function handleKeyDown(e) {
     console.log('Selection cleared')
   }
 
-  // Delete or Backspace: Delete clip
-  if ((e.key === 'Delete' || e.key === 'Backspace') && audioStore.selectedClipId) {
+  // Delete or Backspace: Delete clip or selection
+  if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault()
-    audioStore.deleteClip()
-    console.log('Deleted clip')
+
+    // Priority 1: Delete selected clip
+    if (audioStore.selectedClipId) {
+      audioStore.deleteClip()
+      console.log('Deleted clip')
+    }
+    // Priority 2: Delete selection
+    else if (audioStore.hasSelection) {
+      const command = new DeleteSelectionCommand(
+        audioStore,
+        audioStore.selection.trackId,
+        audioStore.selection
+      )
+      historyStore.execute(command)
+      console.log('Deleted selection')
+    }
   }
 
   // Ctrl/Cmd + I: Import
