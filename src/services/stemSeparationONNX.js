@@ -86,17 +86,34 @@ export class ONNXStemSeparator {
 
       console.log(`📥 Loading ${modelType} model from: ${modelUrl}`)
 
-      // Create session options
-      const sessionOptions = {
-        executionProviders: ['webgpu', 'wasm'],
-        graphOptimizationLevel: 'all',
-        enableCpuMemArena: true,
-        enableMemPattern: true,
-        executionMode: 'sequential'
-      }
+      // Try WebGPU first, fallback to WASM if shader compilation fails
+      let session = null
 
-      // Load model
-      const session = await ort.InferenceSession.create(modelUrl, sessionOptions)
+      try {
+        console.log('🎮 Attempting to load model with WebGPU...')
+        const webgpuOptions = {
+          executionProviders: ['webgpu'],
+          graphOptimizationLevel: 'all',
+          enableCpuMemArena: true,
+          enableMemPattern: true,
+          executionMode: 'sequential'
+        }
+        session = await ort.InferenceSession.create(modelUrl, webgpuOptions)
+        console.log(`✅ ${modelType} model loaded with WebGPU acceleration`)
+      } catch (webgpuError) {
+        console.warn(`⚠️ WebGPU failed (${webgpuError.message}), falling back to WASM...`)
+
+        // Fallback to WASM
+        const wasmOptions = {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all',
+          enableCpuMemArena: true,
+          enableMemPattern: true,
+          executionMode: 'sequential'
+        }
+        session = await ort.InferenceSession.create(modelUrl, wasmOptions)
+        console.log(`✅ ${modelType} model loaded with WASM backend (slower but stable)`)
+      }
 
       console.log(`✅ ${modelType} model loaded successfully`)
       console.log(`   Input names:`, session.inputNames)
