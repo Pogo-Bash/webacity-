@@ -167,6 +167,7 @@ export class MoveClipCommand {
 
 /**
  * Cut clip (copy + delete with undo support)
+ * FIXED: now passes trackId correctly to DeleteClipCommand
  */
 export class CutClipCommand {
   constructor(audioStore, clipId) {
@@ -180,7 +181,7 @@ export class CutClipCommand {
     const clipData = this.audioStore.findClipById(this.clipId)
     if (!clipData) return
 
-    const { clip } = clipData
+    const { clip, trackId } = clipData
 
     // Copy to clipboard
     this.audioStore.clipboard = {
@@ -191,7 +192,7 @@ export class CutClipCommand {
     }
 
     // Delete the clip (creates delete command internally)
-    this.deleteCommand = new DeleteClipCommand(this.audioStore, this.clipId)
+    this.deleteCommand = new DeleteClipCommand(this.audioStore, trackId, this.clipId)
     this.deleteCommand.execute()
 
     console.log(`✂️ Cut clip "${clip.name}"`)

@@ -5,6 +5,7 @@ import AudioRecorder from '../audio/AudioRecorder'
 import AudioGenerators from '../audio/AudioGenerators'
 import AdvancedEffects from '../audio/AdvancedEffects'
 import AudioAnalyzer from '../audio/AudioAnalyzer'
+import ffmpegService from '../services/ffmpegService'
 import { useHistoryStore } from './historyStore'
 import { DeleteClipCommand, MoveClipCommand, CutClipCommand, PasteClipCommand } from '../utils/commands'
 
@@ -33,7 +34,11 @@ export const useAudioStore = defineStore('audio', {
     sampleRate: 44100,
     isInitialized: false,
     viewMode: 'waveform', // 'waveform' or 'spectrogram'
-    timelineSnapInterval: 1 // Timeline snap/grid interval in seconds (1-30)
+    timelineSnapInterval: 1, // Timeline snap/grid interval in seconds (1-30)
+    exportFormat: 'mp3', // Export format: 'mp3', 'aac', 'opus', 'flac', 'wav'
+    exportQuality: 192, // Export quality/bitrate
+    ffmpegLoading: false,
+    ffmpegLoadProgress: 0
   }),
 
   getters: {
@@ -208,13 +213,26 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Load audio file into a track
+     * Load audio file into a track using FFmpeg for universal format support
      */
     async loadAudioFile(file, trackId = null) {
       await this.init()
 
       try {
-        const buffer = await this.engine.loadAudioFile(file)
+        console.log(`Loading audio file: ${file.name}`)
+
+        // Load FFmpeg if not already loaded
+        if (!ffmpegService.isLoaded) {
+          this.ffmpegLoading = true
+          await ffmpegService.load((progress, time) => {
+            this.ffmpegLoadProgress = progress
+            console.log(`FFmpeg loading: ${progress}%`)
+          })
+          this.ffmpegLoading = false
+        }
+
+        // Convert file to AudioBuffer using FFmpeg (supports all formats)
+        const buffer = await ffmpegService.fileToAudioBuffer(file, this.engine.audioContext)
 
         let targetTrackId = trackId
         if (!targetTrackId) {
@@ -225,6 +243,7 @@ export const useAudioStore = defineStore('audio', {
         // Add as a clip to the track
         this.addClipToTrack(targetTrackId, buffer, 0, file.name)
 
+        console.log(`✅ Loaded ${file.name} successfully`)
         return targetTrackId
       } catch (error) {
         console.error('Failed to load audio file:', error)
@@ -360,29 +379,76 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Export entire project (mix all tracks) as WAV
+     * Export entire project (mix all tracks) with format and quality options
      */
-    exportProject() {
+    async exportProject(format = null, quality = null) {
       if (!this.hasAudio) return null
 
-      // Export the mix of all tracks
-      const blob = this.engine.exportMix()
-      if (!blob) return null
+      try {
+        const exportFormat = format || this.exportFormat
+        const exportQuality = quality || this.exportQuality
 
-      const filename = `${this.projectName || 'project'}.wav`
+        console.log(`Exporting project as ${exportFormat.toUpperCase()}...`)
 
-      // Create download link
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = filename
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
+        // Load FFmpeg if not already loaded
+        if (!ffmpegService.isLoaded) {
+          this.ffmpegLoading = true
+          await ffmpegService.load((progress) => {
+            this.ffmpegLoadProgress = progress
+            console.log(`FFmpeg loading: ${progress}%`)
+          })
+          this.ffmpegLoading = false
+        }
 
-      console.log(`✅ Exported project: ${filename}`)
-      return true
+        // Get mixed audio buffer from engine
+        const mixedBuffer = this.engine.getMixedBuffer()
+        if (!mixedBuffer) {
+          console.error('Failed to get mixed buffer')
+          return null
+        }
+
+        // Export using FFmpeg with format and quality options
+        const { blob, filename } = await ffmpegService.exportAudioBuffer(mixedBuffer, {
+          format: exportFormat,
+          quality: exportQuality,
+          filename: `${this.projectName || 'project'}.${exportFormat}`
+        })
+
+        // Create download link
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = filename
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        URL.revokeObjectURL(url)
+
+        console.log(`✅ Exported project: ${filename} (${(blob.size / 1024).toFixed(2)} KB)`)
+        return true
+      } catch (error) {
+        console.error('Failed to export project:', error)
+        throw error
+      }
+    },
+
+    /**
+     * Set export format
+     */
+    setExportFormat(format) {
+      const validFormats = ['mp3', 'aac', 'opus', 'flac', 'wav']
+      if (validFormats.includes(format)) {
+        this.exportFormat = format
+        console.log(`Export format set to: ${format.toUpperCase()}`)
+      }
+    },
+
+    /**
+     * Set export quality
+     */
+    setExportQuality(quality) {
+      this.exportQuality = quality
+      console.log(`Export quality set to: ${quality}`)
     },
 
     /**
@@ -530,7 +596,7 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Delete selected clip
+     * Delete selected clip (FIXED: now passes trackId correctly)
      */
     deleteClip() {
       if (!this.selectedClipId) return false
@@ -538,8 +604,10 @@ export const useAudioStore = defineStore('audio', {
       const clipData = this.selectedClip
       if (!clipData) return false
 
+      const { trackId } = clipData
+
       const historyStore = useHistoryStore()
-      const command = new DeleteClipCommand(this, this.selectedClipId)
+      const command = new DeleteClipCommand(this, trackId, this.selectedClipId)
       historyStore.execute(command)
 
       this.selectedClipId = null
@@ -705,7 +773,7 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Apply effect to selected clip
+     * Apply effect to selected clip (supports ALL channels, not just stereo)
      */
     async applyEffectToClip(effectName, params) {
       console.log('🎵 Applying effect to clip:', effectName, params)
@@ -728,101 +796,43 @@ export const useAudioStore = defineStore('audio', {
       if (!track) return false
 
       try {
-        const channelData = clip.buffer.getChannelData(0)
-        let processedData
-
-        // Apply effect using WASM bridge or advancedEffects
-        switch (effectName) {
-          case 'amplify':
-            processedData = this.wasmBridge.amplify(channelData, params.factor)
-            break
-          case 'normalize':
-            processedData = this.wasmBridge.normalize(channelData, params.targetPeak)
-            break
-          case 'fadeIn':
-            processedData = this.wasmBridge.fadeIn(channelData, params.samples)
-            break
-          case 'fadeOut':
-            processedData = this.wasmBridge.fadeOut(channelData, params.samples)
-            break
-          case 'reverse':
-            processedData = this.wasmBridge.reverse(channelData)
-            break
-          case 'lowPass':
-            processedData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
-            break
-          case 'highPass':
-            processedData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
-            break
-          case 'compress':
-            processedData = this.wasmBridge.compress(
-              channelData,
-              params.threshold,
-              params.ratio,
-              params.attack,
-              params.release
-            )
-            break
-          case 'reverb':
-            processedData = this.advancedEffects.reverb(
-              channelData,
-              params.roomSize,
-              params.damping,
-              params.wetLevel,
-              params.dryLevel
-            )
-            break
-          case 'equalizer':
-            processedData = this.advancedEffects.equalizer(channelData, params.bands)
-            break
-          case 'pitch':
-            processedData = this.advancedEffects.changePitch(channelData, params.semitones)
-            break
-          default:
-            console.warn('Unknown effect:', effectName)
-            return false
-        }
-
-        // Create new buffer with processed data
+        // Create new buffer with same properties
         const newBuffer = this.engine.audioContext.createBuffer(
           clip.buffer.numberOfChannels,
           clip.buffer.length,
           clip.buffer.sampleRate
         )
 
-        // Copy processed data to first channel
-        newBuffer.getChannelData(0).set(processedData)
+        // Process ALL channels (not just stereo)
+        for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
+          const channelData = clip.buffer.getChannelData(ch)
+          let processedData
 
-        // If stereo, process other channels with the same effect
-        for (let i = 1; i < clip.buffer.numberOfChannels; i++) {
-          const channelData = clip.buffer.getChannelData(i)
-          let processedChannelData
-
-          // Apply the same effect to other channels
+          // Apply effect using WASM bridge or advancedEffects
           switch (effectName) {
             case 'amplify':
-              processedChannelData = this.wasmBridge.amplify(channelData, params.factor)
+              processedData = this.wasmBridge.amplify(channelData, params.factor)
               break
             case 'normalize':
-              processedChannelData = this.wasmBridge.normalize(channelData, params.targetPeak)
+              processedData = this.wasmBridge.normalize(channelData, params.targetPeak)
               break
             case 'fadeIn':
-              processedChannelData = this.wasmBridge.fadeIn(channelData, params.samples)
+              processedData = this.wasmBridge.fadeIn(channelData, params.samples)
               break
             case 'fadeOut':
-              processedChannelData = this.wasmBridge.fadeOut(channelData, params.samples)
+              processedData = this.wasmBridge.fadeOut(channelData, params.samples)
               break
             case 'reverse':
-              processedChannelData = this.wasmBridge.reverse(channelData)
+              processedData = this.wasmBridge.reverse(channelData)
               break
             case 'lowPass':
-              processedChannelData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
+              processedData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
               break
             case 'highPass':
-              processedChannelData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
+              processedData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
               break
             case 'compress':
-              processedChannelData = this.wasmBridge.compress(
+              processedData = this.wasmBridge.compress(
                 channelData,
                 params.threshold,
                 params.ratio,
@@ -831,7 +841,7 @@ export const useAudioStore = defineStore('audio', {
               )
               break
             case 'reverb':
-              processedChannelData = this.advancedEffects.reverb(
+              processedData = this.advancedEffects.reverb(
                 channelData,
                 params.roomSize,
                 params.damping,
@@ -840,16 +850,18 @@ export const useAudioStore = defineStore('audio', {
               )
               break
             case 'equalizer':
-              processedChannelData = this.advancedEffects.equalizer(channelData, params.bands)
+              processedData = this.advancedEffects.equalizer(channelData, params.bands)
               break
             case 'pitch':
-              processedChannelData = this.advancedEffects.changePitch(channelData, params.semitones)
+              processedData = this.advancedEffects.changePitch(channelData, params.semitones)
               break
             default:
-              processedChannelData = channelData
+              console.warn('Unknown effect:', effectName)
+              return false
           }
 
-          newBuffer.getChannelData(i).set(processedChannelData)
+          // Copy processed data to new buffer channel
+          newBuffer.getChannelData(ch).set(processedData)
         }
 
         // Find the clip index in the track
@@ -1287,7 +1299,7 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Remove clip from track
+     * Remove clip from track (with Vue reactivity fix)
      */
     removeClip(trackId, clipId) {
       const track = this.tracks.find(t => t.id === trackId)
@@ -1296,10 +1308,17 @@ export const useAudioStore = defineStore('audio', {
       const index = track.clips.findIndex(c => c.id === clipId)
       if (index === -1) return false
 
+      // Remove clip
       track.clips.splice(index, 1)
+
+      // Force Vue reactivity by reassigning array
+      track.clips = [...track.clips]
+
+      // Rebuild track buffer and update duration
       this.updateTrackBufferFromClips(trackId)
       this.updateDuration()
 
+      console.log(`Removed clip ${clipId} from track ${trackId}`)
       return true
     },
 
