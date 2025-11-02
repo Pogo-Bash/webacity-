@@ -334,6 +334,7 @@ class AdvancedEffects {
   /**
    * Reverb effect using convolution with impulse response
    * Simpler version using Schroeder reverb algorithm
+   * NOW WITH OUTPUT NORMALIZATION to prevent clipping
    */
   reverb(input, roomSize = 0.5, damping = 0.5, wetLevel = 0.3, dryLevel = 0.7) {
     const output = new Float32Array(input.length)
@@ -352,8 +353,11 @@ class AdvancedEffects {
     const allpassBuffers = allpassDelays.map(delay => new Float32Array(delay).fill(0))
     const allpassIndices = allpassDelays.map(() => 0)
 
-    // Feedback for comb filters
-    const combFeedback = 0.84 * (1 - damping * 0.3)
+    // Feedback for comb filters (reduced to prevent buildup)
+    const combFeedback = 0.7 * (1 - damping * 0.4)
+
+    // Track peak for normalization
+    let peak = 0
 
     for (let i = 0; i < input.length; i++) {
       let sample = input[i]
@@ -392,6 +396,21 @@ class AdvancedEffects {
 
       // Mix wet and dry signals
       output[i] = input[i] * dryLevel + allpassOut * wetLevel
+
+      // Track peak for normalization
+      const absSample = Math.abs(output[i])
+      if (absSample > peak) {
+        peak = absSample
+      }
+    }
+
+    // Normalize output to prevent clipping
+    if (peak > 0.95) {
+      const normalizationFactor = 0.95 / peak
+      for (let i = 0; i < output.length; i++) {
+        output[i] *= normalizationFactor
+      }
+      console.log(`Reverb normalized: peak=${peak.toFixed(3)}, factor=${normalizationFactor.toFixed(3)}`)
     }
 
     return output

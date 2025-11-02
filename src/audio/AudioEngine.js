@@ -293,6 +293,65 @@ class AudioEngine {
   }
 
   /**
+   * Get mixed buffer from all tracks (for export)
+   */
+  getMixedBuffer() {
+    // Find all non-muted tracks with buffers
+    const activeTracks = [];
+    let maxDuration = 0;
+    let maxChannels = 2;
+
+    for (const [trackId, track] of this.tracks) {
+      if (!track.muted && track.buffer) {
+        activeTracks.push(track);
+        maxDuration = Math.max(maxDuration, track.buffer.duration);
+        maxChannels = Math.max(maxChannels, track.buffer.numberOfChannels);
+      }
+    }
+
+    if (activeTracks.length === 0) return null;
+
+    // Create output buffer
+    const sampleRate = this.sampleRate;
+    const length = Math.ceil(maxDuration * sampleRate);
+    const mixedBuffer = this.audioContext.createBuffer(maxChannels, length, sampleRate);
+
+    // Initialize with silence
+    for (let ch = 0; ch < maxChannels; ch++) {
+      mixedBuffer.getChannelData(ch).fill(0);
+    }
+
+    // Mix all tracks
+    for (const track of activeTracks) {
+      const buffer = track.buffer;
+      const volume = track.volume;
+
+      for (let ch = 0; ch < maxChannels; ch++) {
+        const mixedData = mixedBuffer.getChannelData(ch);
+        const sourceChannelIndex = Math.min(ch, buffer.numberOfChannels - 1);
+        const sourceData = buffer.getChannelData(sourceChannelIndex);
+
+        for (let i = 0; i < Math.min(sourceData.length, mixedData.length); i++) {
+          // Mix with volume applied
+          mixedData[i] = Math.max(-1, Math.min(1, mixedData[i] + sourceData[i] * volume));
+        }
+      }
+    }
+
+    return mixedBuffer;
+  }
+
+  /**
+   * Export mix of all tracks as WAV
+   */
+  exportMix() {
+    const mixedBuffer = this.getMixedBuffer();
+    if (!mixedBuffer) return null;
+
+    return this.bufferToWav(mixedBuffer);
+  }
+
+  /**
    * Convert AudioBuffer to WAV file
    */
   bufferToWav(buffer) {
