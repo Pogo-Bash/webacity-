@@ -213,27 +213,66 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Load audio file into a track using FFmpeg for universal format support
+     * Load audio file into a track with FFmpeg (tries FFmpeg first, falls back to Web Audio API)
      */
     async loadAudioFile(file, trackId = null) {
       await this.init()
 
-      try {
-        console.log(`Loading audio file: ${file.name}`)
+      let buffer = null
+      let usedFallback = false
 
-        // Load FFmpeg if not already loaded
+      try {
+        console.log(`📂 Loading audio file: ${file.name}`)
+
+        // Try FFmpeg first for universal format support
         if (!ffmpegService.isLoaded) {
           this.ffmpegLoading = true
-          await ffmpegService.load((progress, time) => {
+          console.log('🔄 Loading FFmpeg.wasm...')
+
+          const loaded = await ffmpegService.load((progress, message) => {
             this.ffmpegLoadProgress = progress
-            console.log(`FFmpeg loading: ${progress}%`)
+            console.log(`FFmpeg: ${message}`)
           })
+
           this.ffmpegLoading = false
+
+          if (!loaded) {
+            console.warn('⚠️ FFmpeg failed to load, will use Web Audio API (limited format support)')
+          }
         }
 
-        // Convert file to AudioBuffer using FFmpeg (supports all formats)
-        const buffer = await ffmpegService.fileToAudioBuffer(file, this.engine.audioContext)
+        // Try FFmpeg conversion
+        if (ffmpegService.isLoaded) {
+          try {
+            console.log('🎵 Converting audio file with FFmpeg...')
+            buffer = await ffmpegService.fileToAudioBuffer(
+              file,
+              this.engine.audioContext,
+              (progress, message) => {
+                console.log(`Conversion: ${message} (${progress}%)`)
+              }
+            )
+            console.log(`✅ FFmpeg conversion successful (source: ${ffmpegService.loadSource})`)
+          } catch (ffmpegError) {
+            console.warn('⚠️ FFmpeg conversion failed, falling back to Web Audio API:', ffmpegError.message)
+            usedFallback = true
+          }
+        } else {
+          usedFallback = true
+        }
 
+        // Fallback to Web Audio API if FFmpeg failed
+        if (!buffer && usedFallback) {
+          console.log('🔄 Using Web Audio API to decode file (supports: WAV, MP3, OGG, M4A)')
+          try {
+            buffer = await this.engine.loadAudioFile(file)
+            console.log('✅ Web Audio API decoding successful')
+          } catch (webAudioError) {
+            throw new Error(`Both FFmpeg and Web Audio API failed. File format may not be supported. Error: ${webAudioError.message}`)
+          }
+        }
+
+        // Create track and add clip
         let targetTrackId = trackId
         if (!targetTrackId) {
           const track = this.addTrack(file.name)
@@ -243,10 +282,11 @@ export const useAudioStore = defineStore('audio', {
         // Add as a clip to the track
         this.addClipToTrack(targetTrackId, buffer, 0, file.name)
 
-        console.log(`✅ Loaded ${file.name} successfully`)
+        const method = usedFallback ? 'Web Audio API' : 'FFmpeg'
+        console.log(`✅ Successfully loaded ${file.name} using ${method}`)
         return targetTrackId
       } catch (error) {
-        console.error('Failed to load audio file:', error)
+        console.error('❌ Failed to load audio file:', error)
         throw error
       }
     },
@@ -382,37 +422,84 @@ export const useAudioStore = defineStore('audio', {
      * Export entire project (mix all tracks) with format and quality options
      */
     async exportProject(format = null, quality = null) {
-      if (!this.hasAudio) return null
+      if (!this.hasAudio) {
+        console.error('❌ No audio to export')
+        return null
+      }
+
+      const exportFormat = format || this.exportFormat
+      const exportQuality = quality || this.exportQuality
 
       try {
-        const exportFormat = format || this.exportFormat
-        const exportQuality = quality || this.exportQuality
-
-        console.log(`Exporting project as ${exportFormat.toUpperCase()}...`)
-
-        // Load FFmpeg if not already loaded
-        if (!ffmpegService.isLoaded) {
-          this.ffmpegLoading = true
-          await ffmpegService.load((progress) => {
-            this.ffmpegLoadProgress = progress
-            console.log(`FFmpeg loading: ${progress}%`)
-          })
-          this.ffmpegLoading = false
-        }
+        console.log(`📤 Exporting project as ${exportFormat.toUpperCase()} (quality: ${exportQuality})...`)
 
         // Get mixed audio buffer from engine
         const mixedBuffer = this.engine.getMixedBuffer()
         if (!mixedBuffer) {
-          console.error('Failed to get mixed buffer')
+          console.error('❌ Failed to get mixed buffer')
           return null
         }
 
-        // Export using FFmpeg with format and quality options
-        const { blob, filename } = await ffmpegService.exportAudioBuffer(mixedBuffer, {
-          format: exportFormat,
-          quality: exportQuality,
-          filename: `${this.projectName || 'project'}.${exportFormat}`
-        })
+        let blob, filename
+
+        // Try FFmpeg for compressed formats, fallback to WAV
+        if (exportFormat !== 'wav') {
+          // Load FFmpeg if not already loaded
+          if (!ffmpegService.isLoaded) {
+            this.ffmpegLoading = true
+            console.log('🔄 Loading FFmpeg for export...')
+
+            const loaded = await ffmpegService.load((progress, message) => {
+              this.ffmpegLoadProgress = progress
+              console.log(`FFmpeg: ${message}`)
+            })
+
+            this.ffmpegLoading = false
+
+            if (!loaded) {
+              console.warn(`⚠️ FFmpeg failed to load. Falling back to WAV export.`)
+              // Fall back to WAV export
+              blob = this.engine.exportMix()
+              filename = `${this.projectName || 'project'}.wav`
+            }
+          }
+
+          // Try FFmpeg export
+          if (ffmpegService.isLoaded && !blob) {
+            try {
+              console.log(`🎵 Exporting to ${exportFormat.toUpperCase()}...`)
+              const result = await ffmpegService.exportAudioBuffer(
+                mixedBuffer,
+                {
+                  format: exportFormat,
+                  quality: exportQuality,
+                  filename: `${this.projectName || 'project'}.${exportFormat}`
+                },
+                (progress, message) => {
+                  console.log(`Export: ${message} (${progress}%)`)
+                }
+              )
+              blob = result.blob
+              filename = result.filename
+              console.log(`✅ FFmpeg export successful (source: ${ffmpegService.loadSource})`)
+            } catch (ffmpegError) {
+              console.warn('⚠️ FFmpeg export failed, falling back to WAV:', ffmpegError.message)
+              // Fall back to WAV
+              blob = this.engine.exportMix()
+              filename = `${this.projectName || 'project'}.wav`
+            }
+          }
+        } else {
+          // Direct WAV export (no FFmpeg needed)
+          console.log('🎵 Exporting to WAV...')
+          blob = this.engine.exportMix()
+          filename = `${this.projectName || 'project'}.wav`
+        }
+
+        if (!blob) {
+          console.error('❌ Export failed - no blob created')
+          return null
+        }
 
         // Create download link
         const url = URL.createObjectURL(blob)
@@ -424,10 +511,14 @@ export const useAudioStore = defineStore('audio', {
         document.body.removeChild(a)
         URL.revokeObjectURL(url)
 
-        console.log(`✅ Exported project: ${filename} (${(blob.size / 1024).toFixed(2)} KB)`)
+        const sizeKB = (blob.size / 1024).toFixed(2)
+        const sizeMB = (blob.size / (1024 * 1024)).toFixed(2)
+        const sizeStr = blob.size > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`
+
+        console.log(`✅ Exported project: ${filename} (${sizeStr})`)
         return true
       } catch (error) {
-        console.error('Failed to export project:', error)
+        console.error('❌ Failed to export project:', error)
         throw error
       }
     },
