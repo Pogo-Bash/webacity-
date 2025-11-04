@@ -1,10 +1,17 @@
 /**
- * FFmpeg.wasm Service
- * Handles audio file I/O and format conversion using FFmpeg.wasm
+ * FFmpeg.wasm Service with Robust Fallback Strategy
+ *
+ * Loading Strategy:
+ * 1. Try self-hosted files from /ffmpeg/ (fastest, most reliable)
+ * 2. Fall back to jsdelivr CDN
+ * 3. Fall back to unpkg CDN
+ * 4. If all fail, return null (caller should use Web Audio API fallback)
+ *
+ * Based on Vext.sh's approach for maximum reliability
  */
 
 import { FFmpeg } from '@ffmpeg/ffmpeg'
-import { toBlobURL } from '@ffmpeg/util'
+import { toBlobURL, fetchFile } from '@ffmpeg/util'
 
 class FFmpegService {
   constructor() {
@@ -12,85 +19,180 @@ class FFmpegService {
     this.isLoaded = false
     this.loadProgress = 0
     this.progressCallback = null
+    this.loadSource = null // Track which source was used: 'self-hosted', 'jsdelivr', 'unpkg', or null
   }
 
   /**
-   * Load FFmpeg.wasm with progress callbacks
+   * Load FFmpeg.wasm with multi-source fallback strategy
    * @param {Function} onProgress - Callback for progress updates (0-100)
+   * @returns {Promise<boolean>} Success status
    */
   async load(onProgress = null) {
     if (this.isLoaded) {
-      console.log('FFmpeg already loaded')
+      console.log('✅ FFmpeg already loaded from:', this.loadSource)
       return true
     }
 
-    try {
-      this.progressCallback = onProgress
-      console.log('Loading FFmpeg.wasm...')
+    this.progressCallback = onProgress
+    console.log('🔄 Loading FFmpeg.wasm...')
 
-      this.ffmpeg = new FFmpeg()
+    // Try loading from different sources in order
+    const sources = [
+      { name: 'self-hosted', loader: () => this.loadFromSelfHosted() },
+      { name: 'jsdelivr', loader: () => this.loadFromCDN('jsdelivr') },
+      { name: 'unpkg', loader: () => this.loadFromCDN('unpkg') }
+    ]
 
-      // Set up logging
-      this.ffmpeg.on('log', ({ message }) => {
-        console.log('[FFmpeg]', message)
-      })
+    for (const source of sources) {
+      try {
+        console.log(`Attempting to load FFmpeg from ${source.name}...`)
+        await source.loader()
+        this.isLoaded = true
+        this.loadSource = source.name
+        console.log(`✅ FFmpeg.wasm loaded successfully from ${source.name}`)
 
-      // Set up progress tracking
-      this.ffmpeg.on('progress', ({ progress, time }) => {
-        this.loadProgress = Math.round(progress * 100)
         if (this.progressCallback) {
-          this.progressCallback(this.loadProgress, time)
+          this.progressCallback(100, 'FFmpeg loaded successfully')
         }
-      })
 
-      // Load FFmpeg core from CDN
-      const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
-
-      await this.ffmpeg.load({
-        coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-        wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-      })
-
-      this.isLoaded = true
-      console.log('✅ FFmpeg.wasm loaded successfully')
-      return true
-    } catch (error) {
-      console.error('Failed to load FFmpeg.wasm:', error)
-      throw new Error(`FFmpeg load failed: ${error.message}`)
+        return true
+      } catch (error) {
+        console.warn(`⚠️ Failed to load FFmpeg from ${source.name}:`, error.message)
+        // Continue to next source
+      }
     }
+
+    // All sources failed
+    console.error('❌ Failed to load FFmpeg from all sources')
+    this.isLoaded = false
+    this.loadSource = null
+
+    if (this.progressCallback) {
+      this.progressCallback(0, 'FFmpeg load failed - will use basic audio decoding')
+    }
+
+    return false
+  }
+
+  /**
+   * Load FFmpeg from self-hosted files in /ffmpeg/
+   * @private
+   */
+  async loadFromSelfHosted() {
+    const baseURL = window.location.origin + '/ffmpeg'
+
+    this.ffmpeg = new FFmpeg()
+
+    // Set up logging
+    this.ffmpeg.on('log', ({ message }) => {
+      if (!message.includes('Opening')) { // Reduce noise
+        console.log('[FFmpeg]', message)
+      }
+    })
+
+    // Set up progress tracking
+    this.ffmpeg.on('progress', ({ progress, time }) => {
+      this.loadProgress = Math.round(progress * 100)
+      if (this.progressCallback) {
+        this.progressCallback(this.loadProgress, `Loading: ${this.loadProgress}%`)
+      }
+    })
+
+    // Load from self-hosted files using toBlobURL for cross-origin safety
+    await this.ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript')
+    })
+  }
+
+  /**
+   * Load FFmpeg from CDN (jsdelivr or unpkg)
+   * @param {string} cdn - CDN name: 'jsdelivr' or 'unpkg'
+   * @private
+   */
+  async loadFromCDN(cdn) {
+    const version = '0.12.6'
+
+    const cdnURLs = {
+      jsdelivr: `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${version}/dist/umd`,
+      unpkg: `https://unpkg.com/@ffmpeg/core@${version}/dist/umd`
+    }
+
+    const baseURL = cdnURLs[cdn]
+    if (!baseURL) {
+      throw new Error(`Unknown CDN: ${cdn}`)
+    }
+
+    this.ffmpeg = new FFmpeg()
+
+    // Set up logging
+    this.ffmpeg.on('log', ({ message }) => {
+      if (!message.includes('Opening')) {
+        console.log('[FFmpeg]', message)
+      }
+    })
+
+    // Set up progress tracking
+    this.ffmpeg.on('progress', ({ progress, time }) => {
+      this.loadProgress = Math.round(progress * 100)
+      if (this.progressCallback) {
+        this.progressCallback(this.loadProgress, `Loading from ${cdn}: ${this.loadProgress}%`)
+      }
+    })
+
+    // Load from CDN using toBlobURL
+    await this.ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+      workerURL: await toBlobURL(`${baseURL}/ffmpeg-core.worker.js`, 'text/javascript')
+    })
   }
 
   /**
    * Convert any audio file format to AudioBuffer
    * @param {File} file - Input audio file
    * @param {AudioContext} audioContext - Web Audio API context
+   * @param {Function} onProgress - Progress callback
    * @returns {Promise<AudioBuffer>} Decoded audio buffer
    */
-  async fileToAudioBuffer(file, audioContext) {
+  async fileToAudioBuffer(file, audioContext, onProgress = null) {
     if (!this.isLoaded) {
-      await this.load()
+      throw new Error('FFmpeg not loaded. Call load() first or use Web Audio API fallback.')
     }
 
     try {
-      console.log(`Converting ${file.name} to AudioBuffer...`)
+      if (onProgress) {
+        onProgress(10, 'Reading file...')
+      }
 
       // Read file as array buffer
       const fileData = await file.arrayBuffer()
       const inputFileName = 'input' + this.getFileExtension(file.name)
       const outputFileName = 'output.wav'
 
+      if (onProgress) {
+        onProgress(30, 'Converting audio format...')
+      }
+
       // Write input file to FFmpeg virtual filesystem
       await this.ffmpeg.writeFile(inputFileName, new Uint8Array(fileData))
 
       // Convert to WAV for Web Audio API compatibility
-      // Force mono/stereo output and standard sample rate
+      // Use -y to overwrite, -hide_banner for cleaner logs
       await this.ffmpeg.exec([
+        '-y',
+        '-hide_banner',
         '-i', inputFileName,
         '-acodec', 'pcm_f32le',  // 32-bit float PCM
         '-ar', '44100',          // Sample rate
         '-ac', '2',              // Force stereo (will upmix mono or downmix surround)
         outputFileName
       ])
+
+      if (onProgress) {
+        onProgress(70, 'Decoding audio...')
+      }
 
       // Read output file
       const outputData = await this.ffmpeg.readFile(outputFileName)
@@ -101,14 +203,22 @@ class FFmpegService {
       const audioBuffer = await audioContext.decodeAudioData(outputArrayBuffer)
 
       // Clean up virtual filesystem
-      await this.ffmpeg.deleteFile(inputFileName)
-      await this.ffmpeg.deleteFile(outputFileName)
+      try {
+        await this.ffmpeg.deleteFile(inputFileName)
+        await this.ffmpeg.deleteFile(outputFileName)
+      } catch (cleanupError) {
+        console.warn('Cleanup warning:', cleanupError.message)
+      }
 
-      console.log(`✅ Converted ${file.name} to AudioBuffer (${audioBuffer.duration.toFixed(2)}s)`)
+      if (onProgress) {
+        onProgress(100, 'Complete!')
+      }
+
+      console.log(`✅ Converted ${file.name} to AudioBuffer (${audioBuffer.duration.toFixed(2)}s, ${audioBuffer.numberOfChannels} channels)`)
       return audioBuffer
     } catch (error) {
-      console.error('Failed to convert file to AudioBuffer:', error)
-      throw new Error(`File conversion failed: ${error.message}`)
+      console.error('❌ FFmpeg conversion failed:', error)
+      throw new Error(`Audio conversion failed: ${error.message}`)
     }
   }
 
@@ -119,11 +229,12 @@ class FFmpegService {
    * @param {string} options.format - Output format: 'mp3', 'aac', 'opus', 'flac', 'wav'
    * @param {number} options.quality - Quality/bitrate (format-specific)
    * @param {string} options.filename - Output filename
+   * @param {Function} onProgress - Progress callback
    * @returns {Promise<{blob: Blob, filename: string}>}
    */
-  async exportAudioBuffer(audioBuffer, options = {}) {
+  async exportAudioBuffer(audioBuffer, options = {}, onProgress = null) {
     if (!this.isLoaded) {
-      await this.load()
+      throw new Error('FFmpeg not loaded. Call load() first.')
     }
 
     const {
@@ -133,7 +244,9 @@ class FFmpegService {
     } = options
 
     try {
-      console.log(`Exporting AudioBuffer as ${format.toUpperCase()} (quality: ${quality})...`)
+      if (onProgress) {
+        onProgress(10, `Preparing ${format.toUpperCase()} export...`)
+      }
 
       // Convert AudioBuffer to WAV first (input for FFmpeg)
       const wavBlob = await this.audioBufferToWav(audioBuffer)
@@ -141,6 +254,10 @@ class FFmpegService {
 
       const inputFileName = 'input.wav'
       const outputFileName = `output.${format}`
+
+      if (onProgress) {
+        onProgress(30, `Encoding to ${format.toUpperCase()}...`)
+      }
 
       // Write input WAV to virtual filesystem
       await this.ffmpeg.writeFile(inputFileName, new Uint8Array(wavData))
@@ -151,6 +268,10 @@ class FFmpegService {
       // Execute FFmpeg conversion
       await this.ffmpeg.exec(ffmpegArgs)
 
+      if (onProgress) {
+        onProgress(80, 'Finalizing export...')
+      }
+
       // Read output file
       const outputData = await this.ffmpeg.readFile(outputFileName)
       const outputBlob = new Blob([outputData.buffer], {
@@ -158,17 +279,26 @@ class FFmpegService {
       })
 
       // Clean up
-      await this.ffmpeg.deleteFile(inputFileName)
-      await this.ffmpeg.deleteFile(outputFileName)
+      try {
+        await this.ffmpeg.deleteFile(inputFileName)
+        await this.ffmpeg.deleteFile(outputFileName)
+      } catch (cleanupError) {
+        console.warn('Cleanup warning:', cleanupError.message)
+      }
 
+      if (onProgress) {
+        onProgress(100, 'Export complete!')
+      }
+
+      const finalFilename = filename.endsWith(`.${format}`) ? filename : `${filename}.${format}`
       console.log(`✅ Exported as ${format.toUpperCase()} (${(outputBlob.size / 1024).toFixed(2)} KB)`)
 
       return {
         blob: outputBlob,
-        filename: filename.endsWith(`.${format}`) ? filename : `${filename}.${format}`
+        filename: finalFilename
       }
     } catch (error) {
-      console.error('Failed to export AudioBuffer:', error)
+      console.error('❌ Export failed:', error)
       throw new Error(`Export failed: ${error.message}`)
     }
   }
@@ -259,6 +389,8 @@ class FFmpegService {
   buildExportCommand(format, quality, inputFile, outputFile) {
     const commands = {
       mp3: [
+        '-y',
+        '-hide_banner',
         '-i', inputFile,
         '-codec:a', 'libmp3lame',
         '-b:a', `${quality}k`,
@@ -266,6 +398,8 @@ class FFmpegService {
         outputFile
       ],
       aac: [
+        '-y',
+        '-hide_banner',
         '-i', inputFile,
         '-codec:a', 'aac',
         '-b:a', `${quality}k`,
@@ -273,6 +407,8 @@ class FFmpegService {
         outputFile
       ],
       opus: [
+        '-y',
+        '-hide_banner',
         '-i', inputFile,
         '-codec:a', 'libopus',
         '-b:a', `${quality}k`,
@@ -280,12 +416,16 @@ class FFmpegService {
         outputFile
       ],
       flac: [
+        '-y',
+        '-hide_banner',
         '-i', inputFile,
         '-codec:a', 'flac',
         '-compression_level', Math.min(12, Math.floor(quality / 10)).toString(),
         outputFile
       ],
       wav: [
+        '-y',
+        '-hide_banner',
         '-i', inputFile,
         '-codec:a', 'pcm_s16le',
         '-ar', '44100',
@@ -321,81 +461,15 @@ class FFmpegService {
   }
 
   /**
-   * Convert multi-channel to stereo (helper)
-   * @param {AudioBuffer} audioBuffer
-   * @param {AudioContext} audioContext
-   * @returns {AudioBuffer} Stereo audio buffer
+   * Check if FFmpeg is loaded and which source was used
+   * @returns {Object} Status object
    */
-  convertToStereo(audioBuffer, audioContext) {
-    if (audioBuffer.numberOfChannels === 2) {
-      return audioBuffer
+  getStatus() {
+    return {
+      isLoaded: this.isLoaded,
+      source: this.loadSource,
+      progress: this.loadProgress
     }
-
-    const length = audioBuffer.length
-    const sampleRate = audioBuffer.sampleRate
-    const stereoBuffer = audioContext.createBuffer(2, length, sampleRate)
-
-    if (audioBuffer.numberOfChannels === 1) {
-      // Mono to stereo: duplicate channel
-      const mono = audioBuffer.getChannelData(0)
-      stereoBuffer.getChannelData(0).set(mono)
-      stereoBuffer.getChannelData(1).set(mono)
-    } else {
-      // Multi-channel to stereo: downmix
-      const left = stereoBuffer.getChannelData(0)
-      const right = stereoBuffer.getChannelData(1)
-
-      for (let i = 0; i < length; i++) {
-        let leftSum = 0
-        let rightSum = 0
-
-        // Simple downmix: average channels
-        for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
-          const sample = audioBuffer.getChannelData(ch)[i]
-          if (ch % 2 === 0) {
-            leftSum += sample
-          } else {
-            rightSum += sample
-          }
-        }
-
-        const leftChannels = Math.ceil(audioBuffer.numberOfChannels / 2)
-        const rightChannels = Math.floor(audioBuffer.numberOfChannels / 2)
-
-        left[i] = leftSum / leftChannels
-        right[i] = rightSum / (rightChannels || 1)
-      }
-    }
-
-    return stereoBuffer
-  }
-
-  /**
-   * Convert stereo to mono (helper)
-   * @param {AudioBuffer} audioBuffer
-   * @param {AudioContext} audioContext
-   * @returns {AudioBuffer} Mono audio buffer
-   */
-  convertToMono(audioBuffer, audioContext) {
-    if (audioBuffer.numberOfChannels === 1) {
-      return audioBuffer
-    }
-
-    const length = audioBuffer.length
-    const sampleRate = audioBuffer.sampleRate
-    const monoBuffer = audioContext.createBuffer(1, length, sampleRate)
-    const monoData = monoBuffer.getChannelData(0)
-
-    // Average all channels
-    for (let i = 0; i < length; i++) {
-      let sum = 0
-      for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
-        sum += audioBuffer.getChannelData(ch)[i]
-      }
-      monoData[i] = sum / audioBuffer.numberOfChannels
-    }
-
-    return monoBuffer
   }
 
   /**
@@ -406,6 +480,7 @@ class FFmpegService {
       // FFmpeg.wasm doesn't have explicit unload, but we can reset state
       this.isLoaded = false
       this.ffmpeg = null
+      this.loadSource = null
       console.log('FFmpeg unloaded')
     }
   }

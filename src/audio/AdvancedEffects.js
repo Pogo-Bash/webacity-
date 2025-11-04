@@ -332,11 +332,22 @@ class AdvancedEffects {
   }
 
   /**
-   * Reverb effect using convolution with impulse response
-   * Simpler version using Schroeder reverb algorithm
-   * NOW WITH OUTPUT NORMALIZATION to prevent clipping
+   * Reverb effect using Schroeder reverb algorithm
+   * Fixed with input validation, soft clipping, and output normalization
    */
   reverb(input, roomSize = 0.5, damping = 0.5, wetLevel = 0.3, dryLevel = 0.7) {
+    // Input validation
+    if (!input || input.length === 0) {
+      console.error('Reverb: Invalid input')
+      return new Float32Array(0)
+    }
+
+    // Clamp parameters to valid ranges
+    roomSize = Math.max(0, Math.min(1, roomSize))
+    damping = Math.max(0, Math.min(1, damping))
+    wetLevel = Math.max(0, Math.min(1, wetLevel))
+    dryLevel = Math.max(0, Math.min(1, dryLevel))
+
     const output = new Float32Array(input.length)
 
     // Comb filter delays (in samples) based on room size
@@ -354,13 +365,14 @@ class AdvancedEffects {
     const allpassIndices = allpassDelays.map(() => 0)
 
     // Feedback for comb filters (reduced to prevent buildup)
-    const combFeedback = 0.7 * (1 - damping * 0.4)
+    const combFeedback = 0.65 * (1 - damping * 0.5)
 
     // Track peak for normalization
     let peak = 0
 
     for (let i = 0; i < input.length; i++) {
-      let sample = input[i]
+      // Clamp input to prevent extreme values
+      let sample = Math.max(-1, Math.min(1, input[i]))
       let combOut = 0
 
       // Parallel comb filters
@@ -388,14 +400,19 @@ class AdvancedEffects {
 
         const delayed = buffer[index]
         const feedforward = allpassOut * -0.5
-        allpassOut = delayed + feedforward
+
+        // Soft clipping on allpass output to prevent buildup
+        allpassOut = Math.max(-1, Math.min(1, (delayed + feedforward) * 0.5))
 
         buffer[index] = allpassOut + delayed * 0.5
         allpassIndices[j] = (index + 1) % delay
       }
 
       // Mix wet and dry signals
-      output[i] = input[i] * dryLevel + allpassOut * wetLevel
+      output[i] = sample * dryLevel + allpassOut * wetLevel
+
+      // Final safety clipping
+      output[i] = Math.max(-1, Math.min(1, output[i]))
 
       // Track peak for normalization
       const absSample = Math.abs(output[i])
@@ -404,7 +421,7 @@ class AdvancedEffects {
       }
     }
 
-    // Normalize output to prevent clipping
+    // Normalize output to prevent clipping (only if needed)
     if (peak > 0.95) {
       const normalizationFactor = 0.95 / peak
       for (let i = 0; i < output.length; i++) {
