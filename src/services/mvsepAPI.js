@@ -10,6 +10,13 @@
 const API_BASE_URL = import.meta.env.DEV ? '/api/mvsep' : 'https://mvsep.com'
 const STORAGE_KEY = 'mvsep_api_token'
 
+// Debug: Log API configuration
+console.log('🔧 MVSep API Configuration:', {
+  isDev: import.meta.env.DEV,
+  apiBaseUrl: API_BASE_URL,
+  mode: import.meta.env.MODE
+})
+
 /**
  * Curated separation presets for different use cases
  */
@@ -105,8 +112,11 @@ class MVSepAPIService {
       throw new Error('No API token configured')
     }
 
+    const url = `${API_BASE_URL}/api/app/user`
+    console.log('🔍 Validating API token at:', url)
+
     try {
-      const response = await fetch(`${API_BASE_URL}/api/app/user`, {
+      const response = await fetch(url, {
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${this.apiToken}`
