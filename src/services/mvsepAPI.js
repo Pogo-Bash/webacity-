@@ -123,14 +123,34 @@ class MVSepAPIService {
         }
       })
 
+      console.log('📡 API Response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries())
+      })
+
       if (!response.ok) {
+        // Try to get error details from response body
+        let errorMessage = `API request failed: ${response.status}`
+        try {
+          const errorData = await response.json()
+          console.error('❌ API Error Response:', errorData)
+          errorMessage = errorData.error || errorData.message || errorMessage
+        } catch (e) {
+          // Response is not JSON, try text
+          const errorText = await response.text()
+          console.error('❌ API Error Text:', errorText)
+          if (errorText) errorMessage = errorText
+        }
+
         if (response.status === 401) {
           throw new Error('Invalid API token')
         }
-        throw new Error(`API request failed: ${response.status}`)
+        throw new Error(errorMessage)
       }
 
       const data = await response.json()
+      console.log('✅ API User Info:', data)
       return data
     } catch (error) {
       console.error('Failed to validate API token:', error)
