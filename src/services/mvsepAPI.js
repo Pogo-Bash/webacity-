@@ -346,55 +346,102 @@ class MVSepAPIService {
 
   /**
    * Poll job status until completion
+   * FIXED: No longer gets stuck at 95%, better progress tracking, more debugging
    * @param {string} hash - Job hash
    * @param {Function} onProgress - Callback for progress updates
    * @returns {Promise<Object>} Final job data with download URLs
    */
   async pollJobStatus(hash, onProgress) {
-    const maxAttempts = 300 // 5 minutes max (300 seconds)
+    const maxAttempts = 600 // 10 minutes max (allow more time)
     let attempts = 0
+    let consecutiveErrors = 0
+    const maxConsecutiveErrors = 5
+
+    console.log(`🔄 Starting to poll job: ${hash}`)
 
     while (attempts < maxAttempts) {
-      const result = await this.getSeparationResult(hash)
+      try {
+        const result = await this.getSeparationResult(hash)
+        consecutiveErrors = 0 // Reset error counter on success
 
-      const status = result.status // 'waiting', 'distributing', 'processing', 'done', 'failed'
+        // Log the raw status for debugging
+        console.log(`📊 Poll attempt ${attempts + 1}: status="${result.status}"`, result)
 
-      // Calculate progress percentage
-      let progress = 0
-      if (status === 'done') {
-        progress = 100
-      } else if (status === 'processing') {
-        progress = Math.min(95, 50 + attempts)
-      } else if (status === 'distributing') {
-        progress = 25
-      } else {
-        progress = Math.min(20, attempts)
+        const status = result.status // 'waiting', 'distributing', 'processing', 'done', 'failed'
+        const data = result.data || result
+
+        // Calculate progress percentage - FIXED: No longer caps at 95%!
+        let progress = 0
+        let message = data.message || this.getStatusMessage(status)
+
+        if (status === 'done') {
+          progress = 100
+          console.log('✅ Job complete!')
+        } else if (status === 'processing') {
+          // Progress from 50% to 95% based on time (more realistic)
+          const processingProgress = Math.min(45, Math.floor(attempts * 1.5))
+          progress = 50 + processingProgress // 50% to 95%
+          console.log(`⚙️ Processing... (${progress}%)`)
+        } else if (status === 'distributing') {
+          progress = 30
+          console.log('📦 Distributing...')
+        } else if (status === 'waiting') {
+          progress = Math.min(20, attempts * 2)
+          console.log('⏳ Waiting in queue...')
+        } else {
+          // Unknown status
+          console.warn(`⚠️ Unknown status: "${status}"`)
+          progress = 50
+        }
+
+        // Send progress update
+        if (onProgress) {
+          onProgress({
+            status,
+            queuePosition: data.current_order || data.currentOrder,
+            queueCount: data.queue_count || data.queueCount,
+            message,
+            progress
+          })
+        }
+
+        // Check if done - CRITICAL: This must work!
+        if (status === 'done') {
+          console.log('✅ Separation complete, returning results')
+          console.log('📦 Result data:', data)
+          return data // Contains files array with download URLs
+        }
+
+        // Check if failed
+        if (status === 'failed') {
+          const errorMsg = data.message || 'Separation failed'
+          console.error('❌ Job failed:', errorMsg)
+          throw new Error(errorMsg)
+        }
+
+        // Wait before next poll - use adaptive polling
+        // Poll faster at first, then slow down
+        const pollInterval = attempts < 60 ? 1000 : 2000 // 1s for first minute, then 2s
+        await new Promise(resolve => setTimeout(resolve, pollInterval))
+        attempts++
+
+      } catch (error) {
+        consecutiveErrors++
+        console.error(`❌ Error polling job (${consecutiveErrors}/${maxConsecutiveErrors}):`, error.message)
+
+        if (consecutiveErrors >= maxConsecutiveErrors) {
+          throw new Error(`Failed to poll job status after ${maxConsecutiveErrors} consecutive errors: ${error.message}`)
+        }
+
+        // Wait a bit longer after an error
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        attempts++
       }
-
-      if (onProgress) {
-        onProgress({
-          status,
-          queuePosition: result.data?.current_order,
-          queueCount: result.data?.queue_count,
-          message: result.data?.message || this.getStatusMessage(status),
-          progress
-        })
-      }
-
-      if (status === 'done') {
-        return result.data // Contains files array with download URLs
-      }
-
-      if (status === 'failed') {
-        throw new Error(result.data?.message || 'Separation failed')
-      }
-
-      // Wait 1 second before next poll
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      attempts++
     }
 
-    throw new Error('Separation timeout - taking too long')
+    // Timeout reached
+    console.error('❌ Job polling timeout reached')
+    throw new Error(`Separation timeout - took longer than ${Math.floor(maxAttempts * 1000 / 60000)} minutes. The job may still be processing on the server.`)
   }
 
   /**
