@@ -7,6 +7,14 @@ export default defineConfig({
   server: {
     host: '0.0.0.0',
     port: parseInt(process.env.PORT) || 5173,
+    proxy: {
+      '/api/mvsep': {
+        target: 'https://mvsep.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/mvsep/, ''),
+        secure: true
+      }
+    }
   },
   preview: {
     host: '0.0.0.0',
