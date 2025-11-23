@@ -7,6 +7,7 @@
       @toggle-effects="showEffects = !showEffects"
       @toggle-generator="showGenerator = !showGenerator"
       @toggle-snippets="showSnippets = !showSnippets"
+      @toggle-stem-separation="showStemSeparation = !showStemSeparation"
       @toggle-settings="showSettings = !showSettings"
       @play-pause="handlePlayPause"
       @stop="audioStore.stop()"
@@ -71,6 +72,9 @@
     <!-- Generator Panel -->
     <GeneratorPanel :visible="showGenerator" @close="showGenerator = false" />
 
+    <!-- Stem Separation Panel -->
+    <StemSeparationPanel :visible="showStemSeparation" @close="showStemSeparation = false" />
+
     <!-- Settings Panel -->
     <SettingsPanel :visible="showSettings" @close="showSettings = false" />
 
@@ -118,6 +122,7 @@ import Timeline from './components/Timeline.vue'
 import Track from './components/Track.vue'
 import EffectPanel from './components/EffectPanel.vue'
 import GeneratorPanel from './components/GeneratorPanel.vue'
+import StemSeparationPanel from './components/StemSeparationPanel.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
 const audioStore = useAudioStore()
@@ -129,6 +134,7 @@ const timeline = ref(null)
 
 const showEffects = ref(false)
 const showGenerator = ref(false)
+const showStemSeparation = ref(false)
 const showSettings = ref(false)
 const showSnippets = ref(false)
 const fileInput = ref(null)
