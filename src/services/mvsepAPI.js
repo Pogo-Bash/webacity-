@@ -1,16 +1,15 @@
 /**
- * MVSep API Service
+ * MVSep API Service - FIXED VERSION
  * Integrates with mvsep.com cloud-based stem separation API
  * API Documentation: https://mvsep.com/api
+ *
+ * FIX: Correctly parse premium_minutes from API response
  */
 
 // Use Vite proxy to avoid CORS issues
-// The proxy is configured in vite.config.js for both dev and preview servers
-// /api/mvsep/* -> https://mvsep.com/* (via Vite proxy)
 const API_BASE_URL = '/api/mvsep'
 const STORAGE_KEY = 'mvsep_api_token'
 
-// Debug: Log API configuration
 console.log('🔧 MVSep API Configuration:', {
   apiBaseUrl: API_BASE_URL,
   mode: import.meta.env.MODE,
@@ -105,6 +104,7 @@ class MVSepAPIService {
 
   /**
    * Validate API token and get user information
+   * FIXED: Now correctly parses the API response structure
    * @returns {Promise<Object>} User info: { name, email, premium_minutes, premium_enabled, current_queue }
    */
   async validateApiToken() {
@@ -113,28 +113,22 @@ class MVSepAPIService {
     }
 
     const url = `${API_BASE_URL}/api/app/user?api_token=${this.apiToken}`
-    console.log('🔍 Validating API token at:', url.replace(this.apiToken, '***'))
+    console.log('🔍 Validating API token')
 
     try {
       const response = await fetch(url, {
         method: 'GET'
       })
 
-      console.log('📡 API Response:', {
-        status: response.status,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers.entries())
-      })
+      console.log('📡 API Response Status:', response.status, response.statusText)
 
       if (!response.ok) {
-        // Try to get error details from response body
         let errorMessage = `API request failed: ${response.status}`
         try {
           const errorData = await response.json()
           console.error('❌ API Error Response:', errorData)
           errorMessage = errorData.error || errorData.message || errorMessage
         } catch (e) {
-          // Response is not JSON, try text
           const errorText = await response.text()
           console.error('❌ API Error Text:', errorText)
           if (errorText) errorMessage = errorText
@@ -146,11 +140,77 @@ class MVSepAPIService {
         throw new Error(errorMessage)
       }
 
-      const data = await response.json()
-      console.log('✅ API User Info:', data)
-      return data
+      const rawData = await response.json()
+      console.log('📦 Raw API Response:', JSON.stringify(rawData, null, 2))
+
+      // FIXED: Parse the response structure correctly
+      // MVSep API may return data in different structures:
+      // 1. { data: { premium_minutes: X, ... } }
+      // 2. { premium_minutes: X, ... }
+      // 3. { user: { premium_minutes: X, ... } }
+
+      let userData = rawData
+
+      // Try to extract from 'data' wrapper
+      if (rawData.data && typeof rawData.data === 'object') {
+        userData = rawData.data
+      }
+
+      // Try to extract from 'user' wrapper
+      if (userData.user && typeof userData.user === 'object') {
+        userData = userData.user
+      }
+
+      console.log('📊 Extracted User Data:', JSON.stringify(userData, null, 2))
+
+      // Extract premium minutes - check all possible field names
+      let premiumMinutes = 0
+
+      // Check common field names (case-sensitive and camelCase variations)
+      const possibleFields = [
+        'premium_minutes',
+        'premiumMinutes',
+        'minutes',
+        'credits',
+        'balance',
+        'premium_balance',
+        'premiumBalance'
+      ]
+
+      for (const field of possibleFields) {
+        if (userData[field] !== undefined && userData[field] !== null) {
+          premiumMinutes = parseFloat(userData[field]) || 0
+          console.log(`✅ Found credits in field '${field}':`, premiumMinutes)
+          break
+        }
+      }
+
+      // Build normalized user info object
+      const userInfo = {
+        name: userData.name || userData.username || userData.user_name || 'User',
+        email: userData.email || userData.user_email || '',
+        premium_minutes: premiumMinutes,
+        premium_enabled: userData.premium_enabled
+          || userData.premiumEnabled
+          || userData.isPremium
+          || userData.is_premium
+          || (premiumMinutes > 0),
+        current_queue: parseInt(userData.current_queue || userData.currentQueue || userData.queue || 0)
+      }
+
+      console.log('✅ Parsed User Info:', userInfo)
+
+      // Warn if no credits found
+      if (premiumMinutes === 0) {
+        console.warn('⚠️ No premium minutes found in API response. Please check:')
+        console.warn('   1. API token is valid and active')
+        console.warn('   2. Account has credits purchased')
+        console.warn('   3. Raw API response structure:', userData)
+      }
+
+      return userInfo
     } catch (error) {
-      console.error('Failed to validate API token:', error)
+      console.error('❌ Failed to validate API token:', error)
       throw error
     }
   }
@@ -177,8 +237,13 @@ class MVSepAPIService {
         throw new Error(`Failed to get queue status: ${response.status}`)
       }
 
-      const data = await response.json()
-      return data
+      const rawData = await response.json()
+      const data = rawData.data || rawData
+
+      return {
+        queue_count: data.queue_count || data.queueCount || 0,
+        queue_duration: data.queue_duration || data.queueDuration || 0
+      }
     } catch (error) {
       console.error('Failed to get queue status:', error)
       throw error
@@ -192,8 +257,8 @@ class MVSepAPIService {
    * @returns {number} Estimated cost in credits
    */
   estimateCost(durationSeconds, preset) {
-    // Formula: floor(duration * priceMultiplier / 60) || 1
-    const cost = Math.max(1, Math.floor(durationSeconds * preset.priceMultiplier / 60))
+    // Formula: ceil(duration * priceMultiplier / 60) || 1
+    const cost = Math.max(1, Math.ceil(durationSeconds * preset.priceMultiplier / 60))
     return cost
   }
 
@@ -238,18 +303,20 @@ class MVSepAPIService {
         throw new Error(errorData.data?.message || errorData.error || `Failed to create separation: ${response.status}`)
       }
 
-      const data = await response.json()
-      console.log('✅ Separation created:', data)
+      const rawData = await response.json()
+      console.log('✅ Separation created:', rawData)
 
-      if (!data.success) {
-        throw new Error(data.data?.message || 'Job creation failed')
+      const data = rawData.data || rawData
+
+      if (!rawData.success && rawData.success !== undefined) {
+        throw new Error(data.message || 'Job creation failed')
       }
 
-      if (!data.data?.hash) {
+      if (!data.hash) {
         throw new Error('No job hash returned from API')
       }
 
-      return { hash: data.data.hash }
+      return { hash: data.hash }
     } catch (error) {
       console.error('Failed to create separation:', error)
       throw error
