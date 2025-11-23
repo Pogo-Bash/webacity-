@@ -23,7 +23,15 @@ export default defineConfig({
       '.onrender.com',
       'localhost',
       '127.0.0.1'
-    ]
+    ],
+    proxy: {
+      '/api/mvsep': {
+        target: 'https://mvsep.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/mvsep/, ''),
+        secure: true
+      }
+    }
   },
   build: {
     rollupOptions: {
