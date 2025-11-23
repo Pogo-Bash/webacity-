@@ -4,17 +4,17 @@
  * API Documentation: https://mvsep.com/api
  */
 
-// Use proxy in development to avoid CORS issues
-// In development: /api/mvsep/* -> https://mvsep.com/* (via Vite proxy)
-// In production: You may need to configure CORS with MVSep or use a backend proxy
-const API_BASE_URL = import.meta.env.DEV ? '/api/mvsep' : 'https://mvsep.com'
+// Use Vite proxy to avoid CORS issues
+// The proxy is configured in vite.config.js for both dev and preview servers
+// /api/mvsep/* -> https://mvsep.com/* (via Vite proxy)
+const API_BASE_URL = '/api/mvsep'
 const STORAGE_KEY = 'mvsep_api_token'
 
 // Debug: Log API configuration
 console.log('🔧 MVSep API Configuration:', {
-  isDev: import.meta.env.DEV,
   apiBaseUrl: API_BASE_URL,
-  mode: import.meta.env.MODE
+  mode: import.meta.env.MODE,
+  isDev: import.meta.env.DEV
 })
 
 /**
