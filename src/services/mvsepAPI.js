@@ -4,7 +4,10 @@
  * API Documentation: https://mvsep.com/api
  */
 
-const API_BASE_URL = 'https://mvsep.com'
+// Use proxy in development to avoid CORS issues
+// In development: /api/mvsep/* -> https://mvsep.com/* (via Vite proxy)
+// In production: You may need to configure CORS with MVSep or use a backend proxy
+const API_BASE_URL = import.meta.env.DEV ? '/api/mvsep' : 'https://mvsep.com'
 const STORAGE_KEY = 'mvsep_api_token'
 
 /**
