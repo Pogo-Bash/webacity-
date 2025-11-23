@@ -12,7 +12,18 @@ export default defineConfig({
         target: 'https://mvsep.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/mvsep/, ''),
-        secure: true
+        secure: true,
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            console.log('[Proxy]', req.method, req.url, '→', proxyReq.path)
+          })
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            console.log('[Proxy Response]', proxyRes.statusCode, req.url)
+          })
+          proxy.on('error', (err, req, res) => {
+            console.error('[Proxy Error]', err.message, req.url)
+          })
+        }
       }
     }
   },
@@ -29,7 +40,18 @@ export default defineConfig({
         target: 'https://mvsep.com',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/mvsep/, ''),
-        secure: true
+        secure: true,
+        configure: (proxy, options) => {
+          proxy.on('proxyReq', (proxyReq, req, res) => {
+            console.log('[Proxy]', req.method, req.url, '→', proxyReq.path)
+          })
+          proxy.on('proxyRes', (proxyRes, req, res) => {
+            console.log('[Proxy Response]', proxyRes.statusCode, req.url)
+          })
+          proxy.on('error', (err, req, res) => {
+            console.error('[Proxy Error]', err.message, req.url)
+          })
+        }
       }
     }
   },

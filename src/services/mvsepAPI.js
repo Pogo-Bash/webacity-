@@ -112,25 +112,42 @@ class MVSepAPIService {
       throw new Error('No API token configured')
     }
 
-    const url = `${API_BASE_URL}/api/app/user`
-    console.log('🔍 Validating API token at:', url)
+    const url = `${API_BASE_URL}/api/app/user?api_token=${this.apiToken}`
+    console.log('🔍 Validating API token at:', url.replace(this.apiToken, '***'))
 
     try {
       const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.apiToken}`
-        }
+        method: 'GET'
+      })
+
+      console.log('📡 API Response:', {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries())
       })
 
       if (!response.ok) {
+        // Try to get error details from response body
+        let errorMessage = `API request failed: ${response.status}`
+        try {
+          const errorData = await response.json()
+          console.error('❌ API Error Response:', errorData)
+          errorMessage = errorData.error || errorData.message || errorMessage
+        } catch (e) {
+          // Response is not JSON, try text
+          const errorText = await response.text()
+          console.error('❌ API Error Text:', errorText)
+          if (errorText) errorMessage = errorText
+        }
+
         if (response.status === 401) {
           throw new Error('Invalid API token')
         }
-        throw new Error(`API request failed: ${response.status}`)
+        throw new Error(errorMessage)
       }
 
       const data = await response.json()
+      console.log('✅ API User Info:', data)
       return data
     } catch (error) {
       console.error('Failed to validate API token:', error)
@@ -152,11 +169,8 @@ class MVSepAPIService {
    */
   async getQueueStatus() {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/app/queue`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${this.apiToken}`
-        }
+      const response = await fetch(`${API_BASE_URL}/api/app/queue?api_token=${this.apiToken}`, {
+        method: 'GET'
       })
 
       if (!response.ok) {
@@ -196,33 +210,46 @@ class MVSepAPIService {
 
     const { separationType, outputFormat, filename } = options
 
-    // Create FormData
+    // Create FormData with API token as form field
     const formData = new FormData()
-    formData.append('audio', audioBlob, filename || 'audio.wav')
-    formData.append('separation_type', separationType.toString())
+    formData.append('audiofile', audioBlob, filename || 'audio.wav')
+    formData.append('api_token', this.apiToken)
+    formData.append('sep_type', separationType.toString())
     formData.append('output_format', outputFormat.toString())
+
+    console.log('📤 Creating separation job:', {
+      filename,
+      separationType,
+      outputFormat,
+      fileSize: audioBlob.size
+    })
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/separation/create`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiToken}`
-        },
         body: formData
       })
 
+      console.log('📡 Create Response:', response.status, response.statusText)
+
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
-        throw new Error(errorData.error || `Failed to create separation: ${response.status}`)
+        console.error('❌ Create Error:', errorData)
+        throw new Error(errorData.data?.message || errorData.error || `Failed to create separation: ${response.status}`)
       }
 
       const data = await response.json()
+      console.log('✅ Separation created:', data)
 
-      if (!data.hash) {
+      if (!data.success) {
+        throw new Error(data.data?.message || 'Job creation failed')
+      }
+
+      if (!data.data?.hash) {
         throw new Error('No job hash returned from API')
       }
 
-      return { hash: data.hash }
+      return { hash: data.data.hash }
     } catch (error) {
       console.error('Failed to create separation:', error)
       throw error
