@@ -54,6 +54,11 @@
           <div v-if="userInfo" class="text-xs text-gray-400 space-y-1">
             <div>Credits: <span class="text-white font-medium">{{ userInfo.premium_minutes || 0 }} minutes</span></div>
             <div v-if="userInfo.current_queue">Queue: <span class="text-white">{{ userInfo.current_queue }} jobs</span></div>
+            <!-- Debug: Show raw response -->
+            <details class="mt-2">
+              <summary class="cursor-pointer text-gray-500 hover:text-gray-400">Debug Info</summary>
+              <pre class="mt-1 text-xs bg-gray-950 p-2 rounded overflow-auto max-h-32">{{ JSON.stringify(userInfo, null, 2) }}</pre>
+            </details>
           </div>
 
           <button

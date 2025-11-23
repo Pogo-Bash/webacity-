@@ -148,6 +148,14 @@ class MVSepAPIService {
 
       const data = await response.json()
       console.log('✅ API User Info:', data)
+
+      // MVSep API returns data in success/data structure
+      if (data.success && data.data) {
+        console.log('📊 User Credits:', data.data.premium_minutes || 0, 'minutes')
+        return data.data
+      }
+
+      // Fallback: return as-is if structure is different
       return data
     } catch (error) {
       console.error('Failed to validate API token:', error)
