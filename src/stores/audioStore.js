@@ -6,6 +6,7 @@ import AudioRecorder from '../audio/AudioRecorder'
 import AudioGenerators from '../audio/AudioGenerators'
 import AdvancedEffects from '../audio/AdvancedEffects'
 import AudioAnalyzer from '../audio/AudioAnalyzer'
+import EffectsWorkerClient from '../audio/EffectsWorkerClient'
 import ffmpegService from '../services/ffmpegService'
 import { useHistoryStore } from './historyStore'
 import { DeleteClipCommand, MoveClipCommand, CutClipCommand, PasteClipCommand } from '../utils/commands'
@@ -39,7 +40,10 @@ export const useAudioStore = defineStore('audio', {
     exportFormat: 'mp3', // Export format: 'mp3', 'aac', 'opus', 'flac', 'wav'
     exportQuality: 192, // Export quality/bitrate
     ffmpegLoading: false,
-    ffmpegLoadProgress: 0
+    ffmpegLoadProgress: 0,
+    // { clipId, effectName, percent } while an effect is running, otherwise null.
+    effectProgress: null,
+    effectsWorker: null
   }),
 
   getters: {
@@ -103,6 +107,7 @@ export const useAudioStore = defineStore('audio', {
         this.generators = new AudioGenerators(this.engine.audioContext, this.sampleRate)
         this.advancedEffects = new AdvancedEffects(this.sampleRate)
         this.analyzer = new AudioAnalyzer(this.engine.audioContext, this.sampleRate)
+        this.effectsWorker = markRaw(new EffectsWorkerClient())
 
         this.isInitialized = true
 
@@ -908,91 +913,51 @@ export const useAudioStore = defineStore('audio', {
       const track = this.tracks.find(t => t.id === trackId)
       if (!track) return false
 
+      // Effects only operate on the clip's current window. Building a new
+      // buffer with exactly that window also drops any shared-parent audio
+      // outside it, preventing the effect output from leaking into sibling
+      // clips that reference the same underlying buffer.
+      const windowOffset = clip.bufferOffset || 0
+      const windowLength = clip.bufferLength ?? clip.buffer.length
+      const numChannels = clip.buffer.numberOfChannels
+      const sampleRate = clip.buffer.sampleRate
+
+      // Copy each channel's window into its own transferable Float32Array.
+      const channelBuffers = []
+      for (let ch = 0; ch < numChannels; ch++) {
+        const full = clip.buffer.getChannelData(ch)
+        channelBuffers.push(full.slice(windowOffset, windowOffset + windowLength))
+      }
+
+      this.effectProgress = { clipId: this.selectedClipId, effectName, percent: 0 }
       try {
-        // Effects only operate on the clip's current window. Building a new
-        // buffer with exactly that window also drops any shared-parent audio
-        // outside it, preventing the effect output from leaking into sibling
-        // clips that reference the same underlying buffer.
-        const windowOffset = clip.bufferOffset || 0
-        const windowLength = clip.bufferLength ?? clip.buffer.length
-        const newBuffer = this.engine.audioContext.createBuffer(
-          clip.buffer.numberOfChannels,
-          windowLength,
-          clip.buffer.sampleRate
+        const processedBuffers = await this.effectsWorker.process(
+          effectName,
+          params,
+          channelBuffers,
+          sampleRate,
+          (percent) => {
+            if (this.effectProgress) this.effectProgress.percent = percent
+          }
         )
 
-        // Process ALL channels (not just stereo)
-        for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
-          const fullChannel = clip.buffer.getChannelData(ch)
-          const channelData = fullChannel.subarray(windowOffset, windowOffset + windowLength)
-          let processedData
-
-          // Apply effect using WASM bridge or advancedEffects
-          switch (effectName) {
-            case 'amplify':
-              processedData = this.wasmBridge.amplify(channelData, params.factor)
-              break
-            case 'normalize':
-              processedData = this.wasmBridge.normalize(channelData, params.targetPeak)
-              break
-            case 'fadeIn':
-              processedData = this.wasmBridge.fadeIn(channelData, params.samples)
-              break
-            case 'fadeOut':
-              processedData = this.wasmBridge.fadeOut(channelData, params.samples)
-              break
-            case 'reverse':
-              processedData = this.wasmBridge.reverse(channelData)
-              break
-            case 'lowPass':
-              processedData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
-              break
-            case 'highPass':
-              processedData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
-              break
-            case 'compress':
-              processedData = this.wasmBridge.compress(
-                channelData,
-                params.threshold,
-                params.ratio,
-                params.attack,
-                params.release
-              )
-              break
-            case 'reverb':
-              processedData = this.advancedEffects.reverb(
-                channelData,
-                params.roomSize,
-                params.damping,
-                params.wetLevel,
-                params.dryLevel
-              )
-              break
-            case 'equalizer':
-              processedData = this.advancedEffects.equalizer(channelData, params.bands)
-              break
-            case 'pitch':
-              processedData = this.advancedEffects.changePitch(channelData, params.semitones)
-              break
-            default:
-              console.warn('Unknown effect:', effectName)
-              return false
-          }
-
-          // Copy processed data to new buffer channel
-          newBuffer.getChannelData(ch).set(processedData)
+        // Effects like pitch change the length, so size the buffer to match.
+        const newLength = processedBuffers[0]?.length ?? windowLength
+        const newBuffer = this.engine.audioContext.createBuffer(
+          numChannels,
+          newLength,
+          sampleRate
+        )
+        for (let ch = 0; ch < numChannels; ch++) {
+          newBuffer.copyToChannel(processedBuffers[ch], ch, 0)
         }
 
-        // Find the clip index in the track
         const clipIndex = track.clips.findIndex(c => c.id === this.selectedClipId)
         if (clipIndex === -1) {
           console.error('Clip index not found!')
           return false
         }
 
-        console.log('Found clip at index:', clipIndex)
-
-        // Create a new clip object with updated buffer and waveform (to trigger Vue reactivity)
         const updatedClip = {
           ...clip,
           buffer: markRaw(newBuffer),
@@ -1004,12 +969,7 @@ export const useAudioStore = defineStore('audio', {
         }
         this.getOrGenerateClipWaveform(updatedClip)
 
-        console.log('Created updated clip with new waveform data')
-
-        // Replace the clip in the array (this triggers Vue reactivity)
         track.clips.splice(clipIndex, 1, updatedClip)
-
-        console.log('Updated clips array')
         this.updateDuration()
 
         console.log(`Applied ${effectName} to clip "${clip.name}" - effect complete`)
@@ -1017,6 +977,8 @@ export const useAudioStore = defineStore('audio', {
       } catch (error) {
         console.error('Failed to apply effect to clip:', error)
         throw error
+      } finally {
+        this.effectProgress = null
       }
     },
 

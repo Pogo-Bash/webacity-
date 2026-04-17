@@ -9,6 +9,17 @@
       </button>
     </div>
 
+    <!-- Progress bar shown while an effect is running in the worker -->
+    <div v-if="audioStore.effectProgress" class="px-4 py-2 border-b border-gray-700 bg-gray-900">
+      <div class="flex items-center justify-between text-xs text-gray-300 mb-1">
+        <span>Applying {{ audioStore.effectProgress.effectName }}...</span>
+        <span>{{ audioStore.effectProgress.percent }}%</span>
+      </div>
+      <div class="h-1 w-full bg-gray-700 rounded overflow-hidden">
+        <div class="h-full bg-blue-500 transition-all" :style="{ width: audioStore.effectProgress.percent + '%' }"></div>
+      </div>
+    </div>
+
     <div v-if="!selectedTrack" class="p-4 text-gray-400 text-sm">
       Select a track to apply effects
     </div>
