@@ -43,12 +43,13 @@ export class DeleteClipCommand {
   }
 
   execute() {
-    // Save clip data before deleting
+    // Save clip data before deleting. AudioBuffer is immutable once created,
+    // so holding a reference is safe - no clone needed.
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (track) {
       const clip = track.clips.find(c => c.id === this.clipId)
       if (clip) {
-        this.savedClip = { ...clip, buffer: this.cloneBuffer(clip.buffer) }
+        this.savedClip = { ...clip }
       }
     }
     this.audioStore.removeClip(this.trackId, this.clipId)
@@ -63,20 +64,6 @@ export class DeleteClipCommand {
         this.savedClip.name
       )
     }
-  }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
   }
 }
 
@@ -276,12 +263,12 @@ export class SplitClipCommand {
   }
 
   execute() {
-    // Save original clip before splitting
+    // Save original clip before splitting (AudioBuffer is immutable, reference is safe)
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (track) {
       const clip = track.clips.find(c => c.id === this.clipId)
       if (clip) {
-        this.originalClip = { ...clip, buffer: this.cloneBuffer(clip.buffer) }
+        this.originalClip = { ...clip }
       }
     }
 
@@ -317,20 +304,6 @@ export class SplitClipCommand {
       this.originalClip.name
     )
   }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
-  }
 }
 
 /**
@@ -351,13 +324,11 @@ export class ApplyEffectToClipCommand {
     const clipData = this.audioStore.selectedClip
     if (clipData) {
       this.trackId = clipData.trackId
-      // Save previous state
+      // Save previous state. AudioBuffer is immutable; once applyEffectToClip
+      // replaces clip.buffer with a new reference, this command's reference
+      // keeps the old buffer alive for undo without any cloning.
       const clip = clipData.clip
-      this.previousClipState = {
-        ...clip,
-        buffer: markRaw(this.cloneBuffer(clip.buffer)),
-        waveformData: markRaw([...clip.waveformData])
-      }
+      this.previousClipState = { ...clip }
     }
 
     // Apply effect
@@ -382,20 +353,6 @@ export class ApplyEffectToClipCommand {
 
     // Rebuild track buffer
     this.audioStore.updateTrackBufferFromClips(this.trackId)
-  }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
   }
 }
 
@@ -433,16 +390,14 @@ export class DeleteTrackCommand {
   }
 
   execute() {
-    // Save track data before deleting
+    // Save track data before deleting. Buffers are immutable - holding
+    // references is enough for undo.
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (track) {
       this.trackIndex = this.audioStore.tracks.indexOf(track)
       this.savedTrack = {
         ...track,
-        clips: track.clips.map(clip => ({
-          ...clip,
-          buffer: this.cloneBuffer(clip.buffer)
-        }))
+        clips: track.clips.map(clip => ({ ...clip }))
       }
     }
 
@@ -455,20 +410,6 @@ export class DeleteTrackCommand {
       this.audioStore.tracks.splice(this.trackIndex, 0, this.savedTrack)
       this.audioStore.updateDuration()
     }
-  }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
   }
 }
 
@@ -491,8 +432,9 @@ export class ApplyEffectCommand {
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (!track || !track.buffer) return
 
-    // Save previous buffer for undo
-    this.previousBuffer = this.cloneBuffer(track.buffer)
+    // applyEffectToTrack replaces track.buffer with a new reference,
+    // so holding the current one is enough for undo.
+    this.previousBuffer = track.buffer
 
     // Apply effect
     this.audioStore.applyEffectToTrack(this.trackId, this.effectName, this.params, this.selection)
@@ -506,20 +448,6 @@ export class ApplyEffectCommand {
     track.buffer = markRaw(this.previousBuffer)
     this.audioStore.engine.setTrackBuffer(this.trackId, this.previousBuffer)
     track.waveformData = markRaw(this.audioStore.generateWaveformData(this.previousBuffer))
-  }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
   }
 }
 
@@ -538,8 +466,8 @@ export class DeleteSelectionCommand {
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (!track || !track.buffer || !this.selection) return
 
-    // Save previous buffer
-    this.previousBuffer = this.cloneBuffer(track.buffer)
+    // deleteSelection replaces track.buffer - hold a reference for undo.
+    this.previousBuffer = track.buffer
 
     // Delete selection
     this.audioStore.deleteSelection(this.trackId, this.selection)
@@ -554,20 +482,6 @@ export class DeleteSelectionCommand {
     track.waveformData = markRaw(this.audioStore.generateWaveformData(this.previousBuffer))
     track.duration = this.previousBuffer.duration
     this.audioStore.updateDuration()
-  }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
   }
 }
 
@@ -587,8 +501,8 @@ export class PasteCommand {
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (!track || !this.clipboardBuffer) return
 
-    // Save previous buffer (may be null for empty track)
-    this.previousBuffer = track.buffer ? this.cloneBuffer(track.buffer) : null
+    // pasteAtPosition replaces track.buffer; a reference is enough for undo.
+    this.previousBuffer = track.buffer || null
     this.audioStore.pasteAtPosition(this.trackId, this.clipboardBuffer, this.position)
   }
 
@@ -609,19 +523,5 @@ export class PasteCommand {
       track.waveformData = []
     }
     this.audioStore.updateDuration()
-  }
-
-  cloneBuffer(buffer) {
-    const clone = this.audioStore.engine.audioContext.createBuffer(
-      buffer.numberOfChannels,
-      buffer.length,
-      buffer.sampleRate
-    )
-
-    for (let i = 0; i < buffer.numberOfChannels; i++) {
-      clone.getChannelData(i).set(buffer.getChannelData(i))
-    }
-
-    return clone
   }
 }
