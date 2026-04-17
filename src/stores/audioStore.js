@@ -58,10 +58,17 @@ export const useAudioStore = defineStore('audio', {
 
     trackCount: (state) => state.tracks.length,
 
-    hasAudio: (state) => state.tracks.some(t => t.buffer !== null),
+    hasAudio: (state) => state.tracks.some(t => t.clips && t.clips.length > 0),
 
     longestTrackDuration: (state) => {
-      return Math.max(0, ...state.tracks.map(t => t.duration || 0))
+      let max = 0
+      for (const track of state.tracks) {
+        for (const clip of track.clips || []) {
+          const end = clip.startTime + clip.duration
+          if (end > max) max = end
+        }
+      }
+      return max
     },
 
     hasSelection: (state) => state.selection !== null,
@@ -319,12 +326,22 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Play audio
+     * Play audio by scheduling each clip on its track as a BufferSource.
+     * Avoids ever pre-mixing clips into a single track buffer.
      */
     play() {
       if (!this.engine || !this.hasAudio) return
 
-      this.engine.play(this.currentTime)
+      this.engine.resume()
+      // Small lookahead so the first scheduled source has time to be ready.
+      const contextStartTime = this.engine.audioContext.currentTime + 0.1
+
+      for (const track of this.tracks) {
+        if (track.muted) continue
+        this.engine.playTrackClips(track.id, track.clips, this.currentTime, contextStartTime)
+      }
+
+      this.engine.isPlaying = true
       this.isPlaying = true
     },
 
@@ -434,8 +451,9 @@ export const useAudioStore = defineStore('audio', {
       try {
         console.log(`📤 Exporting project as ${exportFormat.toUpperCase()} (quality: ${exportQuality})...`)
 
-        // Get mixed audio buffer from engine
-        const mixedBuffer = this.engine.getMixedBuffer()
+        // Render all clips into a single buffer via an OfflineAudioContext.
+        // During editing nothing mixes - this happens only on export.
+        const mixedBuffer = await this.computeMixedBuffer()
         if (!mixedBuffer) {
           console.error('❌ Failed to get mixed buffer')
           return null
@@ -459,8 +477,7 @@ export const useAudioStore = defineStore('audio', {
 
             if (!loaded) {
               console.warn(`⚠️ FFmpeg failed to load. Falling back to WAV export.`)
-              // Fall back to WAV export
-              blob = this.engine.exportMix()
+              blob = this.engine.bufferToWav(mixedBuffer)
               filename = `${this.projectName || 'project'}.wav`
             }
           }
@@ -485,15 +502,14 @@ export const useAudioStore = defineStore('audio', {
               console.log(`✅ FFmpeg export successful (source: ${ffmpegService.loadSource})`)
             } catch (ffmpegError) {
               console.warn('⚠️ FFmpeg export failed, falling back to WAV:', ffmpegError.message)
-              // Fall back to WAV
-              blob = this.engine.exportMix()
+              blob = this.engine.bufferToWav(mixedBuffer)
               filename = `${this.projectName || 'project'}.wav`
             }
           }
         } else {
           // Direct WAV export (no FFmpeg needed)
           console.log('🎵 Exporting to WAV...')
-          blob = this.engine.exportMix()
+          blob = this.engine.bufferToWav(mixedBuffer)
           filename = `${this.projectName || 'project'}.wav`
         }
 
@@ -525,6 +541,25 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Render all clips from all tracks into a single AudioBuffer via an
+     * OfflineAudioContext. Used for export; never stored in memory during
+     * editing.
+     */
+    async computeMixedBuffer() {
+      if (!this.engine || !this.hasAudio) return null
+
+      const trackSpecs = this.tracks.map(t => ({
+        id: t.id,
+        clips: t.clips,
+        volume: t.volume,
+        pan: t.pan,
+        muted: t.muted
+      }))
+
+      return await this.engine.renderTracksOffline(trackSpecs, this.masterVolume)
+    },
+
+    /**
      * Set export format
      */
     setExportFormat(format) {
@@ -544,9 +579,18 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Update total duration
+     * Update each track's duration from its clips and the project duration
+     * from the longest track.
      */
     updateDuration() {
+      for (const track of this.tracks) {
+        let end = 0
+        for (const clip of track.clips) {
+          const clipEnd = clip.startTime + clip.duration
+          if (clipEnd > end) end = clipEnd
+        }
+        track.duration = end
+      }
       this.duration = this.longestTrackDuration
     },
 
@@ -586,9 +630,6 @@ export const useAudioStore = defineStore('audio', {
 
         // Force reactivity
         track.clips = [...track.clips]
-
-        // Rebuild track buffer from clips
-        this.updateTrackBufferFromClips(track.id)
       })
 
       // Update total duration
@@ -713,7 +754,9 @@ export const useAudioStore = defineStore('audio', {
       if (!this.selection) return false
 
       const track = this.tracks.find(t => t.id === this.selection.trackId)
-      if (!track || !track.buffer) return false
+      if (!track) return false
+      if (!track.buffer) this.updateTrackBufferFromClips(this.selection.trackId)
+      if (!track.buffer) return false
 
       const { startTime, endTime } = this.selection
       const startSample = Math.floor(startTime * this.sampleRate)
@@ -754,7 +797,9 @@ export const useAudioStore = defineStore('audio', {
      */
     deleteSelection(trackId, selection) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer || !selection) return false
+      if (!track || !selection) return false
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return false
 
       const { startTime, endTime } = selection
       const startSample = Math.floor(startTime * this.sampleRate)
@@ -791,76 +836,15 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Paste clipboard at current position
+     * Paste clipboard at current position as a new clip.
+     * Previously this spliced the clipboard into a single track buffer; with
+     * the clip-based engine we simply add a clip at the target time.
      */
     pasteAtPosition(trackId, clipboardBuffer, position) {
       const track = this.tracks.find(t => t.id === trackId)
       if (!track || !clipboardBuffer) return false
 
-      const positionSample = Math.floor(position * this.sampleRate)
-      const clipLength = clipboardBuffer.length
-
-      // If track is empty, create a buffer with the clipboard at the specified position
-      if (!track.buffer) {
-        const newLength = positionSample + clipLength
-
-        // Create new buffer filled with silence
-        const newBuffer = this.engine.audioContext.createBuffer(
-          clipboardBuffer.numberOfChannels,
-          newLength,
-          this.sampleRate
-        )
-
-        // Copy clipboard data at the specified position
-        for (let ch = 0; ch < clipboardBuffer.numberOfChannels; ch++) {
-          const destData = newBuffer.getChannelData(ch)
-          const clipData = clipboardBuffer.getChannelData(ch)
-
-          // Place clipboard at position (buffer is already zeroed/silent)
-          for (let i = 0; i < clipLength; i++) {
-            destData[positionSample + i] = clipData[i]
-          }
-        }
-
-        // Update track
-        track.buffer = markRaw(newBuffer)
-        track.duration = newBuffer.duration
-        this.engine.setTrackBuffer(trackId, newBuffer)
-        track.waveformData = markRaw(this.generateWaveformData(newBuffer))
-        this.updateDuration()
-        console.log('Pasted into empty track at position', position)
-        return true
-      }
-
-      // Track has audio - insert clipboard at position (splice)
-      const newLength = track.buffer.length + clipLength
-
-      // Create new buffer with pasted audio
-      const newBuffer = this.engine.audioContext.createBuffer(
-        track.buffer.numberOfChannels,
-        newLength,
-        this.sampleRate
-      )
-
-      for (let ch = 0; ch < track.buffer.numberOfChannels; ch++) {
-        const originalData = track.buffer.getChannelData(ch)
-        const clipData = clipboardBuffer.getChannelData(ch % clipboardBuffer.numberOfChannels)
-        const newData = newBuffer.getChannelData(ch)
-
-        // Copy before paste position
-        newData.set(originalData.slice(0, positionSample), 0)
-        // Copy clipboard
-        newData.set(clipData, positionSample)
-        // Copy after paste position
-        newData.set(originalData.slice(positionSample), positionSample + clipLength)
-      }
-
-      track.buffer = markRaw(newBuffer)
-      track.duration = newBuffer.duration
-      this.engine.setTrackBuffer(trackId, newBuffer)
-      track.waveformData = markRaw(this.generateWaveformData(newBuffer))
-      this.updateDuration()
-
+      this.addClipToTrack(trackId, clipboardBuffer, position, 'Pasted')
       return true
     },
 
@@ -978,9 +962,7 @@ export const useAudioStore = defineStore('audio', {
         track.clips.splice(clipIndex, 1, updatedClip)
 
         console.log('Updated clips array')
-
-        // Rebuild track buffer from all clips
-        this.updateTrackBufferFromClips(trackId)
+        this.updateDuration()
 
         console.log(`Applied ${effectName} to clip "${clip.name}" - effect complete`)
         return true
@@ -995,7 +977,9 @@ export const useAudioStore = defineStore('audio', {
      */
     async applyEffectToTrack(trackId, effectName, params, selection = null) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return
+      if (!track) return
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return
 
       try {
         let channelData = track.buffer.getChannelData(0)
@@ -1217,7 +1201,11 @@ export const useAudioStore = defineStore('audio', {
      */
     analyzeTrack(trackId) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return null
+      if (!track) return null
+      // track.buffer isn't maintained during editing anymore - build it now
+      // on demand from the track's clips.
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return null
 
       const tempo = this.analyzer.estimateTempo(track.buffer)
       const peaks = this.analyzer.findPeaks(track.buffer)
@@ -1240,7 +1228,9 @@ export const useAudioStore = defineStore('audio', {
      */
     generateSpectrogram(trackId) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return null
+      if (!track) return null
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return null
 
       return this.analyzer.generateSpectrogram(track.buffer)
     },
@@ -1252,7 +1242,9 @@ export const useAudioStore = defineStore('audio', {
       if (!this.selection) return null
 
       const track = this.tracks.find(t => t.id === this.selection.trackId)
-      if (!track || !track.buffer) return null
+      if (!track) return null
+      if (!track.buffer) this.updateTrackBufferFromClips(this.selection.trackId)
+      if (!track.buffer) return null
 
       const { startTime, endTime } = this.selection
       const duration = endTime - startTime
@@ -1347,7 +1339,6 @@ export const useAudioStore = defineStore('audio', {
       }
 
       track.clips.push(clip)
-      this.updateTrackBufferFromClips(trackId)
       this.updateDuration()
 
       return clip
@@ -1398,11 +1389,6 @@ export const useAudioStore = defineStore('audio', {
       // Remove clip
       track.clips.splice(index, 1)
 
-      // Force Vue reactivity by reassigning array
-      track.clips = [...track.clips]
-
-      // Rebuild track buffer and update duration
-      this.updateTrackBufferFromClips(trackId)
       this.updateDuration()
 
       console.log(`Removed clip ${clipId} from track ${trackId}`)
@@ -1558,8 +1544,7 @@ export const useAudioStore = defineStore('audio', {
       // Insert the second clip right after the first one
       track.clips.splice(clipIndex + 1, 0, secondClip)
 
-      // Rebuild the track buffer from all clips
-      this.updateTrackBufferFromClips(trackId)
+      this.updateDuration()
 
       console.log(`Split clip "${clip.name}" at ${splitTime.toFixed(2)}s`)
       return true

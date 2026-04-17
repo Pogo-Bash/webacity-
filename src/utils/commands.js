@@ -101,15 +101,10 @@ export class MoveClipCommand {
       clip.color = toTrack.color
       toTrack.clips.push(clip)
       toTrack.clips = [...toTrack.clips]
-
-      // Update both tracks
-      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
-      this.audioStore.updateTrackBufferFromClips(this.toTrackId)
     } else {
       // Just update position on same track
       clip.startTime = this.newStartTime
       fromTrack.clips = [...fromTrack.clips]
-      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
     }
 
     this.audioStore.updateDuration()
@@ -137,15 +132,10 @@ export class MoveClipCommand {
       clip.color = toTrack.color
       toTrack.clips.push(clip)
       toTrack.clips = [...toTrack.clips]
-
-      // Update both tracks
-      this.audioStore.updateTrackBufferFromClips(this.toTrackId)
-      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
     } else {
       // Just restore position on same track
       clip.startTime = this.oldStartTime
       fromTrack.clips = [...fromTrack.clips]
-      this.audioStore.updateTrackBufferFromClips(this.fromTrackId)
     }
 
     this.audioStore.updateDuration()
@@ -241,7 +231,6 @@ export class PasteClipCommand {
       if (clipIndex !== -1) {
         track.clips.splice(clipIndex, 1)
         track.clips = [...track.clips]
-        this.audioStore.updateTrackBufferFromClips(this.trackId)
         this.audioStore.updateDuration()
         console.log(`↩️ Removed pasted clip`)
       }
@@ -350,9 +339,7 @@ export class ApplyEffectToClipCommand {
       buffer: markRaw(this.previousClipState.buffer),
       waveformData: markRaw(this.previousClipState.waveformData)
     })
-
-    // Rebuild track buffer
-    this.audioStore.updateTrackBufferFromClips(this.trackId)
+    this.audioStore.updateDuration()
   }
 }
 

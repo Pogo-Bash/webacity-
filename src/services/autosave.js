@@ -389,13 +389,9 @@ export class AutosaveService {
           }
         }
 
-        // Update track buffer from clips
-        if (track.clips.length > 0) {
-          this.audioStore.updateTrackBufferFromClips(track.id)
-        }
       }
 
-      // Update duration
+      // Update duration (each track's duration is derived from its clips)
       this.audioStore.updateDuration()
 
       console.log('✅ Project restored from OPFS')
