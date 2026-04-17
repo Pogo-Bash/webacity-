@@ -6,15 +6,25 @@ import { markRaw } from 'vue'
 
 const AUTOSAVE_DIR = 'webacity-autosave'
 const PROJECT_FILE = 'project.json'
-const AUTOSAVE_INTERVAL = 30000 // 30 seconds
+// Debounce: wait this long after the last change before writing.
+const AUTOSAVE_DEBOUNCE = 10000 // 10 seconds
 
 export class AutosaveService {
   constructor(audioStore) {
     this.audioStore = audioStore
-    this.intervalId = null
     this.hasUnsavedChanges = false
     this.opfsRoot = null
     this.autosaveDir = null
+    // Per-clip fingerprint ("buffer identity + window + startTime + duration")
+    // so we can skip clips whose on-disk WAV is still current.
+    this.clipFingerprints = new Map()
+    // A single autosave worker handles WAV encoding so the main thread
+    // never stalls on a large buffer serialization.
+    this.worker = null
+    this.nextWorkerId = 1
+    this.workerPending = new Map()
+    this.debounceTimer = null
+    this.saveInFlight = false
   }
 
   /**
@@ -46,41 +56,118 @@ export class AutosaveService {
    * Start autosaving
    */
   async start() {
-    // Initialize OPFS
     const initialized = await this.initOPFS()
     if (!initialized) {
       console.warn('⚠️ Autosave disabled - OPFS not available')
       return
     }
 
-    // Check for existing autosave on startup
+    this._initWorker()
     await this.checkForAutosave()
 
-    // Save every 30 seconds if there are changes
-    this.intervalId = setInterval(() => {
-      if (this.hasUnsavedChanges) {
-        this.save()
-      }
-    }, AUTOSAVE_INTERVAL)
-
-    console.log('✅ Autosave enabled (saves every 30 seconds using OPFS)')
+    console.log('✅ Autosave enabled (debounced 10s, OPFS-backed)')
   }
 
   /**
    * Stop autosaving
    */
   stop() {
-    if (this.intervalId) {
-      clearInterval(this.intervalId)
-      this.intervalId = null
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer)
+      this.debounceTimer = null
+    }
+    if (this.worker) {
+      this.worker.terminate()
+      this.worker = null
+    }
+    this.workerPending.clear()
+  }
+
+  /**
+   * Mark that changes have been made; saves are debounced so a burst of
+   * edits collapses into a single write 10s after the last one.
+   */
+  markChanged() {
+    this.hasUnsavedChanges = true
+    if (!this.autosaveDir) return
+    if (this.debounceTimer) clearTimeout(this.debounceTimer)
+    this.debounceTimer = setTimeout(() => {
+      this.debounceTimer = null
+      if (this.hasUnsavedChanges && !this.saveInFlight) {
+        this.save().catch(err => console.error('Autosave failed:', err))
+      }
+    }, AUTOSAVE_DEBOUNCE)
+  }
+
+  _initWorker() {
+    if (this.worker) return
+    this.worker = new Worker(
+      new URL('../workers/autosaveWorker.js', import.meta.url),
+      { type: 'module' }
+    )
+    this.worker.onmessage = (event) => {
+      const { id, type } = event.data
+      const entry = this.workerPending.get(id)
+      if (!entry) return
+      this.workerPending.delete(id)
+      if (type === 'done') entry.resolve(event.data.wav)
+      else entry.reject(new Error(event.data.error))
+    }
+    this.worker.onerror = (err) => {
+      for (const [, entry] of this.workerPending) entry.reject(err)
+      this.workerPending.clear()
     }
   }
 
   /**
-   * Mark that changes have been made
+   * Encode a clip's windowed audio to a WAV ArrayBuffer via the worker.
+   * The channel data is copied (slice) to avoid detaching the AudioBuffer.
    */
-  markChanged() {
-    this.hasUnsavedChanges = true
+  async encodeClipWav(clip) {
+    this._initWorker()
+    const id = this.nextWorkerId++
+    const numChannels = clip.buffer.numberOfChannels
+    const windowOffset = clip.bufferOffset || 0
+    const windowLength = clip.bufferLength ?? clip.buffer.length
+
+    const channels = []
+    const transfers = []
+    for (let ch = 0; ch < numChannels; ch++) {
+      const full = clip.buffer.getChannelData(ch)
+      const copy = full.slice(windowOffset, windowOffset + windowLength)
+      channels.push(copy)
+      transfers.push(copy.buffer)
+    }
+
+    return new Promise((resolve, reject) => {
+      this.workerPending.set(id, { resolve, reject })
+      this.worker.postMessage({
+        id,
+        channels,
+        sampleRate: clip.buffer.sampleRate,
+        // Clip data is already sliced to the window, so pass offset=0, length=full.
+        windowOffset: 0,
+        windowLength: null
+      }, transfers)
+    })
+  }
+
+  _fingerprint(clip) {
+    // Identity of the underlying buffer, plus the window, start, and duration.
+    // A fresh buffer ref means the audio changed (e.g. an effect was applied).
+    return [
+      clip.buffer,
+      clip.bufferOffset || 0,
+      clip.bufferLength ?? (clip.buffer ? clip.buffer.length : 0),
+      clip.startTime,
+      clip.duration
+    ]
+  }
+
+  _fingerprintEquals(a, b) {
+    if (!a || !b) return false
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+    return true
   }
 
   /**
@@ -174,6 +261,12 @@ export class AutosaveService {
       console.warn('⚠️ OPFS not initialized')
       return false
     }
+    if (this.saveInFlight) {
+      // Another save is already running; the post-save change check will pick
+      // up any new edits, so just drop this call.
+      return false
+    }
+    this.saveInFlight = true
 
     try {
       console.log('💾 Saving project to OPFS...')
@@ -207,33 +300,11 @@ export class AutosaveService {
           if (clip.buffer) {
             try {
               const clipFileName = `${track.id}_${clip.id}.wav`
+              const clipWindowDuration = (clip.bufferLength ?? clip.buffer.length) / clip.buffer.sampleRate
 
-              // Skip very large buffers that might cause issues (> 5 minutes)
-              if (clip.buffer.duration > 300) {
-                console.warn(`⚠️ Skipping autosave for large clip: ${clip.name} (${clip.buffer.duration.toFixed(1)}s)`)
-                trackData.clips.push({
-                  id: clip.id,
-                  fileName: null, // Mark as not saved
-                  name: clip.name,
-                  startTime: clip.startTime,
-                  duration: clip.duration,
-                  color: clip.color,
-                  skipped: true
-                })
-                continue
-              }
-
-              // Convert audio buffer to WAV (respecting any window set by
-              // splits so we don't serialize shared parent audio repeatedly)
-              const wavData = this.audioBufferToWav(
-                clip.buffer,
-                clip.bufferOffset || 0,
-                clip.bufferLength ?? null
-              )
-
-              // Validate WAV data size (skip if > 50MB)
-              if (wavData.byteLength > 50 * 1024 * 1024) {
-                console.warn(`⚠️ Skipping autosave for large WAV file: ${clip.name} (${(wavData.byteLength / 1024 / 1024).toFixed(1)}MB)`)
+              // Skip very large buffers (> 5 minutes) with a prominent log.
+              if (clipWindowDuration > 300) {
+                console.warn(`⚠️ AUTOSAVE SKIPPED — clip "${clip.name}" is ${clipWindowDuration.toFixed(1)}s, above the 5-min autosave cap. Use File > Save to persist this project.`)
                 trackData.clips.push({
                   id: clip.id,
                   fileName: null,
@@ -246,13 +317,46 @@ export class AutosaveService {
                 continue
               }
 
-              // Write to OPFS
+              // Skip unchanged clips: reuse the existing on-disk WAV.
+              const fp = this._fingerprint(clip)
+              const lastFp = this.clipFingerprints.get(clip.id)
+              if (this._fingerprintEquals(lastFp, fp)) {
+                trackData.clips.push({
+                  id: clip.id,
+                  fileName: clipFileName,
+                  name: clip.name,
+                  startTime: clip.startTime,
+                  duration: clip.duration,
+                  color: clip.color
+                })
+                continue
+              }
+
+              // Encode WAV off the main thread.
+              const wavData = await this.encodeClipWav(clip)
+
+              // Validate WAV data size (skip if > 50MB)
+              if (wavData.byteLength > 50 * 1024 * 1024) {
+                console.warn(`⚠️ AUTOSAVE SKIPPED — encoded WAV for "${clip.name}" is ${(wavData.byteLength / 1024 / 1024).toFixed(1)} MB, above the 50 MB autosave cap.`)
+                trackData.clips.push({
+                  id: clip.id,
+                  fileName: null,
+                  name: clip.name,
+                  startTime: clip.startTime,
+                  duration: clip.duration,
+                  color: clip.color,
+                  skipped: true
+                })
+                continue
+              }
+
               const fileHandle = await this.autosaveDir.getFileHandle(clipFileName, { create: true })
               const writable = await fileHandle.createWritable()
               await writable.write(wavData)
               await writable.close()
 
-              // Save clip metadata
+              this.clipFingerprints.set(clip.id, fp)
+
               trackData.clips.push({
                 id: clip.id,
                 fileName: clipFileName,
@@ -293,6 +397,8 @@ export class AutosaveService {
     } catch (error) {
       console.error('❌ Autosave failed:', error)
       return false
+    } finally {
+      this.saveInFlight = false
     }
   }
 
