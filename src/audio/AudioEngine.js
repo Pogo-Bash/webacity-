@@ -186,16 +186,28 @@ class AudioEngine {
       const clipEnd = clip.startTime + clip.duration;
       if (clipEnd <= startOffset) continue; // clip already passed
 
-      // When startOffset is inside the clip, start the buffer partway through;
-      // otherwise wait until the clip's startTime.
-      const bufferOffset = Math.max(0, startOffset - clip.startTime);
+      const sampleRate = clip.buffer.sampleRate;
+      // A split clip references a window of its parent buffer via
+      // bufferOffset/bufferLength (in samples). Translate that to the
+      // (offset, duration) pair expected by source.start().
+      const windowOffsetSec = (clip.bufferOffset || 0) / sampleRate;
+      const windowLengthSec = clip.bufferLength != null
+        ? clip.bufferLength / sampleRate
+        : clip.duration;
+
+      // When startOffset is inside the clip, start the buffer partway through.
+      const clipRelativeSkip = Math.max(0, startOffset - clip.startTime);
+      const playOffsetSec = windowOffsetSec + clipRelativeSkip;
+      const playDurationSec = Math.max(0, windowLengthSec - clipRelativeSkip);
+      if (playDurationSec <= 0) continue;
+
       const when = contextStartTime + Math.max(0, clip.startTime - startOffset);
 
       const source = this.audioContext.createBufferSource();
       source.buffer = clip.buffer;
       source.connect(track.gainNode);
       try {
-        source.start(when, bufferOffset);
+        source.start(when, playOffsetSec, playDurationSec);
       } catch (e) {
         console.warn('Failed to start clip source:', e);
         continue;
@@ -379,7 +391,13 @@ class AudioEngine {
         const source = offlineCtx.createBufferSource();
         source.buffer = clip.buffer;
         source.connect(gain);
-        source.start(clip.startTime);
+
+        const sr = clip.buffer.sampleRate;
+        const windowOffsetSec = (clip.bufferOffset || 0) / sr;
+        const windowLengthSec = clip.bufferLength != null
+          ? clip.bufferLength / sr
+          : clip.duration;
+        source.start(clip.startTime, windowOffsetSec, windowLengthSec);
       }
     }
 

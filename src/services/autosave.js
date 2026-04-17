@@ -84,9 +84,10 @@ export class AutosaveService {
   }
 
   /**
-   * Convert AudioBuffer to WAV file data
+   * Convert AudioBuffer to WAV file data, optionally restricted to a
+   * sample-index window (used when a clip only references part of its buffer).
    */
-  audioBufferToWav(buffer) {
+  audioBufferToWav(buffer, windowOffset = 0, windowLength = null) {
     const numberOfChannels = buffer.numberOfChannels
     const sampleRate = buffer.sampleRate
     const format = 1 // PCM
@@ -95,11 +96,17 @@ export class AutosaveService {
     const bytesPerSample = bitDepth / 8
     const blockAlign = numberOfChannels * bytesPerSample
 
-    const data = new Float32Array(buffer.length * numberOfChannels)
+    const startSample = Math.max(0, windowOffset | 0)
+    const endSample = windowLength != null
+      ? Math.min(buffer.length, startSample + windowLength)
+      : buffer.length
+    const sampleCount = Math.max(0, endSample - startSample)
+
+    const data = new Float32Array(sampleCount * numberOfChannels)
     for (let channel = 0; channel < numberOfChannels; channel++) {
       const channelData = buffer.getChannelData(channel)
-      for (let i = 0; i < buffer.length; i++) {
-        data[i * numberOfChannels + channel] = channelData[i]
+      for (let i = 0; i < sampleCount; i++) {
+        data[i * numberOfChannels + channel] = channelData[startSample + i]
       }
     }
 
@@ -216,8 +223,13 @@ export class AutosaveService {
                 continue
               }
 
-              // Convert audio buffer to WAV
-              const wavData = this.audioBufferToWav(clip.buffer)
+              // Convert audio buffer to WAV (respecting any window set by
+              // splits so we don't serialize shared parent audio repeatedly)
+              const wavData = this.audioBufferToWav(
+                clip.buffer,
+                clip.bufferOffset || 0,
+                clip.bufferLength ?? null
+              )
 
               // Validate WAV data size (skip if > 50MB)
               if (wavData.byteLength > 50 * 1024 * 1024) {
@@ -372,16 +384,20 @@ export class AutosaveService {
             // Convert WAV to AudioBuffer
             const audioBuffer = await this.wavToAudioBuffer(arrayBuffer)
 
-            // Add clip to track
+            // Add clip to track. Windows are implicitly reset because the
+            // WAV on disk already contains only the saved window.
             const clip = {
               id: clipData.id,
               name: clipData.name,
               buffer: markRaw(audioBuffer),
+              bufferOffset: 0,
+              bufferLength: audioBuffer.length,
               startTime: clipData.startTime,
               duration: clipData.duration,
               color: clipData.color,
-              waveformData: markRaw(this.audioStore.generateWaveformData(audioBuffer))
+              waveformData: null
             }
+            this.audioStore.getOrGenerateClipWaveform(clip)
 
             track.clips.push(clip)
           } catch (error) {

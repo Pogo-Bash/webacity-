@@ -300,20 +300,31 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Generate waveform visualization data
+     * Generate waveform visualization data. If the clip defines a window via
+     * bufferOffset/bufferLength (sample indices), only that region of the
+     * underlying buffer is sampled - so a split clip can share its parent's
+     * buffer without copying audio.
      */
-    generateWaveformData(buffer, samples = 1000) {
+    generateWaveformData(buffer, samples = 2000, bufferOffset = 0, bufferLength = null) {
       const channelData = buffer.getChannelData(0)
-      const blockSize = Math.floor(channelData.length / samples)
+      const startSample = Math.max(0, bufferOffset | 0)
+      const endSample = bufferLength != null
+        ? Math.min(channelData.length, startSample + bufferLength)
+        : channelData.length
+      const region = endSample - startSample
+      if (region <= 0) return []
+
+      const blockSize = Math.max(1, Math.floor(region / samples))
       const waveformData = []
 
       for (let i = 0; i < samples; i++) {
-        const start = i * blockSize
-        const end = start + blockSize
+        const start = startSample + i * blockSize
+        const end = Math.min(endSample, start + blockSize)
+        if (start >= endSample) break
         let min = 1
         let max = -1
 
-        for (let j = start; j < end && j < channelData.length; j++) {
+        for (let j = start; j < end; j++) {
           const value = channelData[j]
           if (value < min) min = value
           if (value > max) max = value
@@ -323,6 +334,30 @@ export const useAudioStore = defineStore('audio', {
       }
 
       return waveformData
+    },
+
+    /**
+     * Return a cached waveform for this clip, respecting bufferOffset/
+     * bufferLength when set. The cache key is the buffer reference + window
+     * so splits that share a parent buffer don't invalidate each other.
+     */
+    getOrGenerateClipWaveform(clip) {
+      if (clip.waveformData && clip._waveformBufferRef === clip.buffer &&
+          clip._waveformOffset === (clip.bufferOffset || 0) &&
+          clip._waveformLength === (clip.bufferLength ?? null)) {
+        return clip.waveformData
+      }
+      const data = markRaw(this.generateWaveformData(
+        clip.buffer,
+        2000,
+        clip.bufferOffset || 0,
+        clip.bufferLength ?? null
+      ))
+      clip.waveformData = data
+      clip._waveformBufferRef = clip.buffer
+      clip._waveformOffset = clip.bufferOffset || 0
+      clip._waveformLength = clip.bufferLength ?? null
+      return data
     },
 
     /**
@@ -687,6 +722,8 @@ export const useAudioStore = defineStore('audio', {
       // Copy clip data to clipboard
       this.clipboard = {
         buffer: markRaw(clip.buffer),
+        bufferOffset: clip.bufferOffset || 0,
+        bufferLength: clip.bufferLength ?? clip.buffer.length,
         duration: clip.duration,
         startTime: 0 // Will be pasted at cursor position
       }
@@ -872,16 +909,22 @@ export const useAudioStore = defineStore('audio', {
       if (!track) return false
 
       try {
-        // Create new buffer with same properties
+        // Effects only operate on the clip's current window. Building a new
+        // buffer with exactly that window also drops any shared-parent audio
+        // outside it, preventing the effect output from leaking into sibling
+        // clips that reference the same underlying buffer.
+        const windowOffset = clip.bufferOffset || 0
+        const windowLength = clip.bufferLength ?? clip.buffer.length
         const newBuffer = this.engine.audioContext.createBuffer(
           clip.buffer.numberOfChannels,
-          clip.buffer.length,
+          windowLength,
           clip.buffer.sampleRate
         )
 
         // Process ALL channels (not just stereo)
         for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
-          const channelData = clip.buffer.getChannelData(ch)
+          const fullChannel = clip.buffer.getChannelData(ch)
+          const channelData = fullChannel.subarray(windowOffset, windowOffset + windowLength)
           let processedData
 
           // Apply effect using WASM bridge or advancedEffects
@@ -953,8 +996,13 @@ export const useAudioStore = defineStore('audio', {
         const updatedClip = {
           ...clip,
           buffer: markRaw(newBuffer),
-          waveformData: markRaw(this.generateWaveformData(newBuffer))
+          bufferOffset: 0,
+          bufferLength: newBuffer.length,
+          duration: newBuffer.duration,
+          waveformData: null,
+          _waveformBufferRef: null
         }
+        this.getOrGenerateClipWaveform(updatedClip)
 
         console.log('Created updated clip with new waveform data')
 
@@ -1321,22 +1369,31 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Add clip to track
+     * Add clip to track. Callers can pass an optional window into the buffer
+     * via opts.bufferOffset / opts.bufferLength (samples) - used by paste to
+     * preserve a split clip's window without duplicating the buffer.
      */
-    addClipToTrack(trackId, buffer, startTime = 0, name = null) {
+    addClipToTrack(trackId, buffer, startTime = 0, name = null, opts = {}) {
       const track = this.tracks.find(t => t.id === trackId)
       if (!track) return null
+
+      const bufferOffset = opts.bufferOffset || 0
+      const bufferLength = opts.bufferLength ?? buffer.length
+      const sampleRate = buffer.sampleRate
 
       const clipId = `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       const clip = {
         id: clipId,
         name: name || `Clip ${track.clips.length + 1}`,
         buffer: markRaw(buffer),
+        bufferOffset,
+        bufferLength,
         startTime,
-        duration: buffer.duration,
-        waveformData: markRaw(this.generateWaveformData(buffer)),
+        duration: bufferLength / sampleRate,
+        waveformData: null,
         color: track.color
       }
+      this.getOrGenerateClipWaveform(clip)
 
       track.clips.push(clip)
       this.updateDuration()
@@ -1487,59 +1544,37 @@ export const useAudioStore = defineStore('audio', {
         return false
       }
 
-      // Calculate the split point within the clip's buffer
-      const relativeTime = splitTime - clip.startTime
+      // Work in the underlying buffer's sample space. Respect any existing
+      // window so splitting a split-of-a-split stays zero-copy.
       const sampleRate = clip.buffer.sampleRate
+      const parentOffset = clip.bufferOffset || 0
+      const parentLength = clip.bufferLength ?? (clip.buffer.length - parentOffset)
+      const relativeTime = splitTime - clip.startTime
       const splitSample = Math.floor(relativeTime * sampleRate)
+      const firstLength = splitSample
+      const secondLength = parentLength - splitSample
 
-      // Create first part (clip start to split point)
-      const firstPartLength = splitSample
-      const firstBuffer = this.engine.audioContext.createBuffer(
-        clip.buffer.numberOfChannels,
-        firstPartLength,
-        sampleRate
-      )
+      // First part: same buffer, same offset, shorter length.
+      clip.bufferOffset = parentOffset
+      clip.bufferLength = firstLength
+      clip.duration = firstLength / sampleRate
+      // Invalidate cached waveform since the window shrank.
+      clip.waveformData = null
+      this.getOrGenerateClipWaveform(clip)
 
-      // Create second part (split point to clip end)
-      const secondPartLength = clip.buffer.length - splitSample
-      const secondBuffer = this.engine.audioContext.createBuffer(
-        clip.buffer.numberOfChannels,
-        secondPartLength,
-        sampleRate
-      )
-
-      // Copy audio data
-      for (let channel = 0; channel < clip.buffer.numberOfChannels; channel++) {
-        const sourceData = clip.buffer.getChannelData(channel)
-        const firstData = firstBuffer.getChannelData(channel)
-        const secondData = secondBuffer.getChannelData(channel)
-
-        // Copy first part
-        for (let i = 0; i < firstPartLength; i++) {
-          firstData[i] = sourceData[i]
-        }
-
-        // Copy second part
-        for (let i = 0; i < secondPartLength; i++) {
-          secondData[i] = sourceData[splitSample + i]
-        }
-      }
-
-      // Update the original clip to be the first part
-      clip.buffer = markRaw(firstBuffer)
-      clip.duration = firstBuffer.duration
-      clip.waveformData = markRaw(this.generateWaveformData(firstBuffer))
-
-      // Create new clip for the second part
+      // Second part: same buffer, shifted offset, remaining length.
       const secondClip = {
         id: `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         name: `${clip.name} (2)`,
-        buffer: markRaw(secondBuffer),
+        buffer: markRaw(clip.buffer),
+        bufferOffset: parentOffset + splitSample,
+        bufferLength: secondLength,
         startTime: splitTime,
-        duration: secondBuffer.duration,
-        waveformData: markRaw(this.generateWaveformData(secondBuffer)),
+        duration: secondLength / sampleRate,
+        waveformData: null,
         color: clip.color
       }
+      this.getOrGenerateClipWaveform(secondClip)
 
       // Insert the second clip right after the first one
       track.clips.splice(clipIndex + 1, 0, secondClip)

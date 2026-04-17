@@ -161,9 +161,12 @@ export class CutClipCommand {
 
     const { clip, trackId } = clipData
 
-    // Copy to clipboard
+    // Copy to clipboard (preserve the clip's buffer window so paste
+    // reproduces only the region the clip actually plays)
     this.audioStore.clipboard = {
       buffer: clip.buffer,
+      bufferOffset: clip.bufferOffset || 0,
+      bufferLength: clip.bufferLength ?? clip.buffer.length,
       duration: clip.duration,
       name: clip.name,
       color: clip.color
@@ -204,12 +207,16 @@ export class PasteClipCommand {
     // Save clipboard data
     this.clipboardData = { ...this.audioStore.clipboard }
 
-    // Add clip to track
+    // Add clip to track, preserving the original window if any
     const clip = this.audioStore.addClipToTrack(
       this.trackId,
       this.clipboardData.buffer,
       this.position,
-      this.clipboardData.name || 'Pasted Clip'
+      this.clipboardData.name || 'Pasted Clip',
+      {
+        bufferOffset: this.clipboardData.bufferOffset || 0,
+        bufferLength: this.clipboardData.bufferLength ?? this.clipboardData.buffer.length
+      }
     )
 
     if (clip) {
