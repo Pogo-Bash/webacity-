@@ -1,10 +1,12 @@
 import { defineStore } from 'pinia'
+import { markRaw } from 'vue'
 import AudioEngine from '../audio/AudioEngine'
 import WasmBridge from '../audio/WasmBridge'
 import AudioRecorder from '../audio/AudioRecorder'
 import AudioGenerators from '../audio/AudioGenerators'
 import AdvancedEffects from '../audio/AdvancedEffects'
 import AudioAnalyzer from '../audio/AudioAnalyzer'
+import EffectsWorkerClient from '../audio/EffectsWorkerClient'
 import ffmpegService from '../services/ffmpegService'
 import { useHistoryStore } from './historyStore'
 import { DeleteClipCommand, MoveClipCommand, CutClipCommand, PasteClipCommand } from '../utils/commands'
@@ -38,7 +40,10 @@ export const useAudioStore = defineStore('audio', {
     exportFormat: 'mp3', // Export format: 'mp3', 'aac', 'opus', 'flac', 'wav'
     exportQuality: 192, // Export quality/bitrate
     ffmpegLoading: false,
-    ffmpegLoadProgress: 0
+    ffmpegLoadProgress: 0,
+    // { clipId, effectName, percent } while an effect is running, otherwise null.
+    effectProgress: null,
+    effectsWorker: null
   }),
 
   getters: {
@@ -57,10 +62,17 @@ export const useAudioStore = defineStore('audio', {
 
     trackCount: (state) => state.tracks.length,
 
-    hasAudio: (state) => state.tracks.some(t => t.buffer !== null),
+    hasAudio: (state) => state.tracks.some(t => t.clips && t.clips.length > 0),
 
     longestTrackDuration: (state) => {
-      return Math.max(0, ...state.tracks.map(t => t.duration || 0))
+      let max = 0
+      for (const track of state.tracks) {
+        for (const clip of track.clips || []) {
+          const end = clip.startTime + clip.duration
+          if (end > max) max = end
+        }
+      }
+      return max
     },
 
     hasSelection: (state) => state.selection !== null,
@@ -95,6 +107,7 @@ export const useAudioStore = defineStore('audio', {
         this.generators = new AudioGenerators(this.engine.audioContext, this.sampleRate)
         this.advancedEffects = new AdvancedEffects(this.sampleRate)
         this.analyzer = new AudioAnalyzer(this.engine.audioContext, this.sampleRate)
+        this.effectsWorker = markRaw(new EffectsWorkerClient())
 
         this.isInitialized = true
 
@@ -292,20 +305,31 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Generate waveform visualization data
+     * Generate waveform visualization data. If the clip defines a window via
+     * bufferOffset/bufferLength (sample indices), only that region of the
+     * underlying buffer is sampled - so a split clip can share its parent's
+     * buffer without copying audio.
      */
-    generateWaveformData(buffer, samples = 1000) {
+    generateWaveformData(buffer, samples = 2000, bufferOffset = 0, bufferLength = null) {
       const channelData = buffer.getChannelData(0)
-      const blockSize = Math.floor(channelData.length / samples)
+      const startSample = Math.max(0, bufferOffset | 0)
+      const endSample = bufferLength != null
+        ? Math.min(channelData.length, startSample + bufferLength)
+        : channelData.length
+      const region = endSample - startSample
+      if (region <= 0) return []
+
+      const blockSize = Math.max(1, Math.floor(region / samples))
       const waveformData = []
 
       for (let i = 0; i < samples; i++) {
-        const start = i * blockSize
-        const end = start + blockSize
+        const start = startSample + i * blockSize
+        const end = Math.min(endSample, start + blockSize)
+        if (start >= endSample) break
         let min = 1
         let max = -1
 
-        for (let j = start; j < end && j < channelData.length; j++) {
+        for (let j = start; j < end; j++) {
           const value = channelData[j]
           if (value < min) min = value
           if (value > max) max = value
@@ -318,12 +342,46 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Play audio
+     * Return a cached waveform for this clip, respecting bufferOffset/
+     * bufferLength when set. The cache key is the buffer reference + window
+     * so splits that share a parent buffer don't invalidate each other.
+     */
+    getOrGenerateClipWaveform(clip) {
+      if (clip.waveformData && clip._waveformBufferRef === clip.buffer &&
+          clip._waveformOffset === (clip.bufferOffset || 0) &&
+          clip._waveformLength === (clip.bufferLength ?? null)) {
+        return clip.waveformData
+      }
+      const data = markRaw(this.generateWaveformData(
+        clip.buffer,
+        2000,
+        clip.bufferOffset || 0,
+        clip.bufferLength ?? null
+      ))
+      clip.waveformData = data
+      clip._waveformBufferRef = clip.buffer
+      clip._waveformOffset = clip.bufferOffset || 0
+      clip._waveformLength = clip.bufferLength ?? null
+      return data
+    },
+
+    /**
+     * Play audio by scheduling each clip on its track as a BufferSource.
+     * Avoids ever pre-mixing clips into a single track buffer.
      */
     play() {
       if (!this.engine || !this.hasAudio) return
 
-      this.engine.play(this.currentTime)
+      this.engine.resume()
+      // Small lookahead so the first scheduled source has time to be ready.
+      const contextStartTime = this.engine.audioContext.currentTime + 0.1
+
+      for (const track of this.tracks) {
+        if (track.muted) continue
+        this.engine.playTrackClips(track.id, track.clips, this.currentTime, contextStartTime)
+      }
+
+      this.engine.isPlaying = true
       this.isPlaying = true
     },
 
@@ -433,8 +491,9 @@ export const useAudioStore = defineStore('audio', {
       try {
         console.log(`📤 Exporting project as ${exportFormat.toUpperCase()} (quality: ${exportQuality})...`)
 
-        // Get mixed audio buffer from engine
-        const mixedBuffer = this.engine.getMixedBuffer()
+        // Render all clips into a single buffer via an OfflineAudioContext.
+        // During editing nothing mixes - this happens only on export.
+        const mixedBuffer = await this.computeMixedBuffer()
         if (!mixedBuffer) {
           console.error('❌ Failed to get mixed buffer')
           return null
@@ -458,8 +517,7 @@ export const useAudioStore = defineStore('audio', {
 
             if (!loaded) {
               console.warn(`⚠️ FFmpeg failed to load. Falling back to WAV export.`)
-              // Fall back to WAV export
-              blob = this.engine.exportMix()
+              blob = this.engine.bufferToWav(mixedBuffer)
               filename = `${this.projectName || 'project'}.wav`
             }
           }
@@ -484,15 +542,14 @@ export const useAudioStore = defineStore('audio', {
               console.log(`✅ FFmpeg export successful (source: ${ffmpegService.loadSource})`)
             } catch (ffmpegError) {
               console.warn('⚠️ FFmpeg export failed, falling back to WAV:', ffmpegError.message)
-              // Fall back to WAV
-              blob = this.engine.exportMix()
+              blob = this.engine.bufferToWav(mixedBuffer)
               filename = `${this.projectName || 'project'}.wav`
             }
           }
         } else {
           // Direct WAV export (no FFmpeg needed)
           console.log('🎵 Exporting to WAV...')
-          blob = this.engine.exportMix()
+          blob = this.engine.bufferToWav(mixedBuffer)
           filename = `${this.projectName || 'project'}.wav`
         }
 
@@ -524,6 +581,25 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
+     * Render all clips from all tracks into a single AudioBuffer via an
+     * OfflineAudioContext. Used for export; never stored in memory during
+     * editing.
+     */
+    async computeMixedBuffer() {
+      if (!this.engine || !this.hasAudio) return null
+
+      const trackSpecs = this.tracks.map(t => ({
+        id: t.id,
+        clips: t.clips,
+        volume: t.volume,
+        pan: t.pan,
+        muted: t.muted
+      }))
+
+      return await this.engine.renderTracksOffline(trackSpecs, this.masterVolume)
+    },
+
+    /**
      * Set export format
      */
     setExportFormat(format) {
@@ -543,9 +619,18 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Update total duration
+     * Update each track's duration from its clips and the project duration
+     * from the longest track.
      */
     updateDuration() {
+      for (const track of this.tracks) {
+        let end = 0
+        for (const clip of track.clips) {
+          const clipEnd = clip.startTime + clip.duration
+          if (clipEnd > end) end = clipEnd
+        }
+        track.duration = end
+      }
       this.duration = this.longestTrackDuration
     },
 
@@ -585,9 +670,6 @@ export const useAudioStore = defineStore('audio', {
 
         // Force reactivity
         track.clips = [...track.clips]
-
-        // Rebuild track buffer from clips
-        this.updateTrackBufferFromClips(track.id)
       })
 
       // Update total duration
@@ -644,7 +726,9 @@ export const useAudioStore = defineStore('audio', {
 
       // Copy clip data to clipboard
       this.clipboard = {
-        buffer: clip.buffer,
+        buffer: markRaw(clip.buffer),
+        bufferOffset: clip.bufferOffset || 0,
+        bufferLength: clip.bufferLength ?? clip.buffer.length,
         duration: clip.duration,
         startTime: 0 // Will be pasted at cursor position
       }
@@ -712,7 +796,9 @@ export const useAudioStore = defineStore('audio', {
       if (!this.selection) return false
 
       const track = this.tracks.find(t => t.id === this.selection.trackId)
-      if (!track || !track.buffer) return false
+      if (!track) return false
+      if (!track.buffer) this.updateTrackBufferFromClips(this.selection.trackId)
+      if (!track.buffer) return false
 
       const { startTime, endTime } = this.selection
       const startSample = Math.floor(startTime * this.sampleRate)
@@ -733,7 +819,7 @@ export const useAudioStore = defineStore('audio', {
       }
 
       this.clipboard = {
-        buffer: clipBuffer,
+        buffer: markRaw(clipBuffer),
         duration: endTime - startTime
       }
 
@@ -753,7 +839,9 @@ export const useAudioStore = defineStore('audio', {
      */
     deleteSelection(trackId, selection) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer || !selection) return false
+      if (!track || !selection) return false
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return false
 
       const { startTime, endTime } = selection
       const startSample = Math.floor(startTime * this.sampleRate)
@@ -779,10 +867,10 @@ export const useAudioStore = defineStore('audio', {
         newData.set(originalData.slice(endSample), startSample)
       }
 
-      track.buffer = newBuffer
+      track.buffer = markRaw(newBuffer)
       track.duration = newBuffer.duration
       this.engine.setTrackBuffer(trackId, newBuffer)
-      track.waveformData = this.generateWaveformData(newBuffer)
+      track.waveformData = markRaw(this.generateWaveformData(newBuffer))
       this.updateDuration()
       this.clearSelection()
 
@@ -790,76 +878,15 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Paste clipboard at current position
+     * Paste clipboard at current position as a new clip.
+     * Previously this spliced the clipboard into a single track buffer; with
+     * the clip-based engine we simply add a clip at the target time.
      */
     pasteAtPosition(trackId, clipboardBuffer, position) {
       const track = this.tracks.find(t => t.id === trackId)
       if (!track || !clipboardBuffer) return false
 
-      const positionSample = Math.floor(position * this.sampleRate)
-      const clipLength = clipboardBuffer.length
-
-      // If track is empty, create a buffer with the clipboard at the specified position
-      if (!track.buffer) {
-        const newLength = positionSample + clipLength
-
-        // Create new buffer filled with silence
-        const newBuffer = this.engine.audioContext.createBuffer(
-          clipboardBuffer.numberOfChannels,
-          newLength,
-          this.sampleRate
-        )
-
-        // Copy clipboard data at the specified position
-        for (let ch = 0; ch < clipboardBuffer.numberOfChannels; ch++) {
-          const destData = newBuffer.getChannelData(ch)
-          const clipData = clipboardBuffer.getChannelData(ch)
-
-          // Place clipboard at position (buffer is already zeroed/silent)
-          for (let i = 0; i < clipLength; i++) {
-            destData[positionSample + i] = clipData[i]
-          }
-        }
-
-        // Update track
-        track.buffer = newBuffer
-        track.duration = newBuffer.duration
-        this.engine.setTrackBuffer(trackId, newBuffer)
-        track.waveformData = this.generateWaveformData(newBuffer)
-        this.updateDuration()
-        console.log('Pasted into empty track at position', position)
-        return true
-      }
-
-      // Track has audio - insert clipboard at position (splice)
-      const newLength = track.buffer.length + clipLength
-
-      // Create new buffer with pasted audio
-      const newBuffer = this.engine.audioContext.createBuffer(
-        track.buffer.numberOfChannels,
-        newLength,
-        this.sampleRate
-      )
-
-      for (let ch = 0; ch < track.buffer.numberOfChannels; ch++) {
-        const originalData = track.buffer.getChannelData(ch)
-        const clipData = clipboardBuffer.getChannelData(ch % clipboardBuffer.numberOfChannels)
-        const newData = newBuffer.getChannelData(ch)
-
-        // Copy before paste position
-        newData.set(originalData.slice(0, positionSample), 0)
-        // Copy clipboard
-        newData.set(clipData, positionSample)
-        // Copy after paste position
-        newData.set(originalData.slice(positionSample), positionSample + clipLength)
-      }
-
-      track.buffer = newBuffer
-      track.duration = newBuffer.duration
-      this.engine.setTrackBuffer(trackId, newBuffer)
-      track.waveformData = this.generateWaveformData(newBuffer)
-      this.updateDuration()
-
+      this.addClipToTrack(trackId, clipboardBuffer, position, 'Pasted')
       return true
     },
 
@@ -886,111 +913,72 @@ export const useAudioStore = defineStore('audio', {
       const track = this.tracks.find(t => t.id === trackId)
       if (!track) return false
 
+      // Effects only operate on the clip's current window. Building a new
+      // buffer with exactly that window also drops any shared-parent audio
+      // outside it, preventing the effect output from leaking into sibling
+      // clips that reference the same underlying buffer.
+      const windowOffset = clip.bufferOffset || 0
+      const windowLength = clip.bufferLength ?? clip.buffer.length
+      const numChannels = clip.buffer.numberOfChannels
+      const sampleRate = clip.buffer.sampleRate
+
+      // Copy each channel's window into its own transferable Float32Array.
+      const channelBuffers = []
+      for (let ch = 0; ch < numChannels; ch++) {
+        const full = clip.buffer.getChannelData(ch)
+        channelBuffers.push(full.slice(windowOffset, windowOffset + windowLength))
+      }
+
+      this.effectProgress = { clipId: this.selectedClipId, effectName, percent: 0 }
       try {
-        // Create new buffer with same properties
-        const newBuffer = this.engine.audioContext.createBuffer(
-          clip.buffer.numberOfChannels,
-          clip.buffer.length,
-          clip.buffer.sampleRate
+        const processedBuffers = await this.effectsWorker.process(
+          effectName,
+          params,
+          channelBuffers,
+          sampleRate,
+          (percent) => {
+            if (this.effectProgress) this.effectProgress.percent = percent
+          }
         )
 
-        // Process ALL channels (not just stereo)
-        for (let ch = 0; ch < clip.buffer.numberOfChannels; ch++) {
-          const channelData = clip.buffer.getChannelData(ch)
-          let processedData
-
-          // Apply effect using WASM bridge or advancedEffects
-          switch (effectName) {
-            case 'amplify':
-              processedData = this.wasmBridge.amplify(channelData, params.factor)
-              break
-            case 'normalize':
-              processedData = this.wasmBridge.normalize(channelData, params.targetPeak)
-              break
-            case 'fadeIn':
-              processedData = this.wasmBridge.fadeIn(channelData, params.samples)
-              break
-            case 'fadeOut':
-              processedData = this.wasmBridge.fadeOut(channelData, params.samples)
-              break
-            case 'reverse':
-              processedData = this.wasmBridge.reverse(channelData)
-              break
-            case 'lowPass':
-              processedData = this.wasmBridge.lowPassFilter(channelData, params.cutoff)
-              break
-            case 'highPass':
-              processedData = this.wasmBridge.highPassFilter(channelData, params.cutoff)
-              break
-            case 'compress':
-              processedData = this.wasmBridge.compress(
-                channelData,
-                params.threshold,
-                params.ratio,
-                params.attack,
-                params.release
-              )
-              break
-            case 'reverb':
-              processedData = this.advancedEffects.reverb(
-                channelData,
-                params.roomSize,
-                params.damping,
-                params.wetLevel,
-                params.dryLevel
-              )
-              break
-            case 'equalizer':
-              processedData = this.advancedEffects.equalizer(channelData, params.bands)
-              break
-            case 'pitch':
-              processedData = this.advancedEffects.changePitch(channelData, params.semitones)
-              break
-            default:
-              console.warn('Unknown effect:', effectName)
-              return false
-          }
-
-          // Copy processed data to new buffer channel
-          newBuffer.getChannelData(ch).set(processedData)
+        // Effects like pitch change the length, so size the buffer to match.
+        const newLength = processedBuffers[0]?.length ?? windowLength
+        const newBuffer = this.engine.audioContext.createBuffer(
+          numChannels,
+          newLength,
+          sampleRate
+        )
+        for (let ch = 0; ch < numChannels; ch++) {
+          newBuffer.copyToChannel(processedBuffers[ch], ch, 0)
         }
 
-        // Find the clip index in the track
         const clipIndex = track.clips.findIndex(c => c.id === this.selectedClipId)
         if (clipIndex === -1) {
           console.error('Clip index not found!')
           return false
         }
 
-        console.log('Found clip at index:', clipIndex)
-
-        // Create a new clip object with updated buffer and waveform (to trigger Vue reactivity)
         const updatedClip = {
           ...clip,
-          buffer: newBuffer,
-          waveformData: this.generateWaveformData(newBuffer),
-          // Add a timestamp to force reactivity
-          _lastModified: Date.now()
+          buffer: markRaw(newBuffer),
+          bufferOffset: 0,
+          bufferLength: newBuffer.length,
+          duration: newBuffer.duration,
+          waveformData: null,
+          _waveformBufferRef: null
         }
+        this.getOrGenerateClipWaveform(updatedClip)
 
-        console.log('Created updated clip with new waveform data')
-
-        // Replace the clip in the array (this triggers Vue reactivity)
         track.clips.splice(clipIndex, 1, updatedClip)
-
-        // Force reactivity by reassigning the clips array
-        track.clips = [...track.clips]
-
-        console.log('Updated clips array')
-
-        // Rebuild track buffer from all clips
-        this.updateTrackBufferFromClips(trackId)
+        this.updateDuration()
 
         console.log(`Applied ${effectName} to clip "${clip.name}" - effect complete`)
         return true
       } catch (error) {
         console.error('Failed to apply effect to clip:', error)
         throw error
+      } finally {
+        this.effectProgress = null
       }
     },
 
@@ -999,7 +987,9 @@ export const useAudioStore = defineStore('audio', {
      */
     async applyEffectToTrack(trackId, effectName, params, selection = null) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return
+      if (!track) return
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return
 
       try {
         let channelData = track.buffer.getChannelData(0)
@@ -1085,9 +1075,9 @@ export const useAudioStore = defineStore('audio', {
         }
 
         // Update track
-        track.buffer = newBuffer
+        track.buffer = markRaw(newBuffer)
         this.engine.setTrackBuffer(trackId, newBuffer)
-        track.waveformData = this.generateWaveformData(newBuffer)
+        track.waveformData = markRaw(this.generateWaveformData(newBuffer))
 
         console.log(`Applied ${effectName} to track ${trackId}${selection ? ' (selection)' : ''}`)
       } catch (error) {
@@ -1221,7 +1211,11 @@ export const useAudioStore = defineStore('audio', {
      */
     analyzeTrack(trackId) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return null
+      if (!track) return null
+      // track.buffer isn't maintained during editing anymore - build it now
+      // on demand from the track's clips.
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return null
 
       const tempo = this.analyzer.estimateTempo(track.buffer)
       const peaks = this.analyzer.findPeaks(track.buffer)
@@ -1244,7 +1238,9 @@ export const useAudioStore = defineStore('audio', {
      */
     generateSpectrogram(trackId) {
       const track = this.tracks.find(t => t.id === trackId)
-      if (!track || !track.buffer) return null
+      if (!track) return null
+      if (!track.buffer) this.updateTrackBufferFromClips(trackId)
+      if (!track.buffer) return null
 
       return this.analyzer.generateSpectrogram(track.buffer)
     },
@@ -1256,7 +1252,9 @@ export const useAudioStore = defineStore('audio', {
       if (!this.selection) return null
 
       const track = this.tracks.find(t => t.id === this.selection.trackId)
-      if (!track || !track.buffer) return null
+      if (!track) return null
+      if (!track.buffer) this.updateTrackBufferFromClips(this.selection.trackId)
+      if (!track.buffer) return null
 
       const { startTime, endTime } = this.selection
       const duration = endTime - startTime
@@ -1290,9 +1288,9 @@ export const useAudioStore = defineStore('audio', {
       const snippet = {
         id: snippetId,
         name: snippetName,
-        buffer: snippetBuffer,
+        buffer: markRaw(snippetBuffer),
         duration,
-        waveformData: this.generateWaveformData(snippetBuffer)
+        waveformData: markRaw(this.generateWaveformData(snippetBuffer))
       }
 
       this.snippets.push(snippet)
@@ -1333,25 +1331,33 @@ export const useAudioStore = defineStore('audio', {
     },
 
     /**
-     * Add clip to track
+     * Add clip to track. Callers can pass an optional window into the buffer
+     * via opts.bufferOffset / opts.bufferLength (samples) - used by paste to
+     * preserve a split clip's window without duplicating the buffer.
      */
-    addClipToTrack(trackId, buffer, startTime = 0, name = null) {
+    addClipToTrack(trackId, buffer, startTime = 0, name = null, opts = {}) {
       const track = this.tracks.find(t => t.id === trackId)
       if (!track) return null
+
+      const bufferOffset = opts.bufferOffset || 0
+      const bufferLength = opts.bufferLength ?? buffer.length
+      const sampleRate = buffer.sampleRate
 
       const clipId = `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
       const clip = {
         id: clipId,
         name: name || `Clip ${track.clips.length + 1}`,
-        buffer,
+        buffer: markRaw(buffer),
+        bufferOffset,
+        bufferLength,
         startTime,
-        duration: buffer.duration,
-        waveformData: this.generateWaveformData(buffer),
+        duration: bufferLength / sampleRate,
+        waveformData: null,
         color: track.color
       }
+      this.getOrGenerateClipWaveform(clip)
 
       track.clips.push(clip)
-      this.updateTrackBufferFromClips(trackId)
       this.updateDuration()
 
       return clip
@@ -1402,11 +1408,6 @@ export const useAudioStore = defineStore('audio', {
       // Remove clip
       track.clips.splice(index, 1)
 
-      // Force Vue reactivity by reassigning array
-      track.clips = [...track.clips]
-
-      // Rebuild track buffer and update duration
-      this.updateTrackBufferFromClips(trackId)
       this.updateDuration()
 
       console.log(`Removed clip ${clipId} from track ${trackId}`)
@@ -1468,9 +1469,9 @@ export const useAudioStore = defineStore('audio', {
       }
 
       // Update track
-      track.buffer = mixedBuffer
+      track.buffer = markRaw(mixedBuffer)
       track.duration = maxEndTime
-      track.waveformData = this.generateWaveformData(mixedBuffer)
+      track.waveformData = markRaw(this.generateWaveformData(mixedBuffer))
       this.engine.setTrackBuffer(trackId, mixedBuffer)
     },
 
@@ -1505,65 +1506,42 @@ export const useAudioStore = defineStore('audio', {
         return false
       }
 
-      // Calculate the split point within the clip's buffer
-      const relativeTime = splitTime - clip.startTime
+      // Work in the underlying buffer's sample space. Respect any existing
+      // window so splitting a split-of-a-split stays zero-copy.
       const sampleRate = clip.buffer.sampleRate
+      const parentOffset = clip.bufferOffset || 0
+      const parentLength = clip.bufferLength ?? (clip.buffer.length - parentOffset)
+      const relativeTime = splitTime - clip.startTime
       const splitSample = Math.floor(relativeTime * sampleRate)
+      const firstLength = splitSample
+      const secondLength = parentLength - splitSample
 
-      // Create first part (clip start to split point)
-      const firstPartLength = splitSample
-      const firstBuffer = this.engine.audioContext.createBuffer(
-        clip.buffer.numberOfChannels,
-        firstPartLength,
-        sampleRate
-      )
+      // First part: same buffer, same offset, shorter length.
+      clip.bufferOffset = parentOffset
+      clip.bufferLength = firstLength
+      clip.duration = firstLength / sampleRate
+      // Invalidate cached waveform since the window shrank.
+      clip.waveformData = null
+      this.getOrGenerateClipWaveform(clip)
 
-      // Create second part (split point to clip end)
-      const secondPartLength = clip.buffer.length - splitSample
-      const secondBuffer = this.engine.audioContext.createBuffer(
-        clip.buffer.numberOfChannels,
-        secondPartLength,
-        sampleRate
-      )
-
-      // Copy audio data
-      for (let channel = 0; channel < clip.buffer.numberOfChannels; channel++) {
-        const sourceData = clip.buffer.getChannelData(channel)
-        const firstData = firstBuffer.getChannelData(channel)
-        const secondData = secondBuffer.getChannelData(channel)
-
-        // Copy first part
-        for (let i = 0; i < firstPartLength; i++) {
-          firstData[i] = sourceData[i]
-        }
-
-        // Copy second part
-        for (let i = 0; i < secondPartLength; i++) {
-          secondData[i] = sourceData[splitSample + i]
-        }
-      }
-
-      // Update the original clip to be the first part
-      clip.buffer = firstBuffer
-      clip.duration = firstBuffer.duration
-      clip.waveformData = this.generateWaveformData(firstBuffer)
-
-      // Create new clip for the second part
+      // Second part: same buffer, shifted offset, remaining length.
       const secondClip = {
         id: `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         name: `${clip.name} (2)`,
-        buffer: secondBuffer,
+        buffer: markRaw(clip.buffer),
+        bufferOffset: parentOffset + splitSample,
+        bufferLength: secondLength,
         startTime: splitTime,
-        duration: secondBuffer.duration,
-        waveformData: this.generateWaveformData(secondBuffer),
+        duration: secondLength / sampleRate,
+        waveformData: null,
         color: clip.color
       }
+      this.getOrGenerateClipWaveform(secondClip)
 
       // Insert the second clip right after the first one
       track.clips.splice(clipIndex + 1, 0, secondClip)
 
-      // Rebuild the track buffer from all clips
-      this.updateTrackBufferFromClips(trackId)
+      this.updateDuration()
 
       console.log(`Split clip "${clip.name}" at ${splitTime.toFixed(2)}s`)
       return true

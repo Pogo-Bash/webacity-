@@ -4,7 +4,9 @@ export const useHistoryStore = defineStore('history', {
   state: () => ({
     undoStack: [],
     redoStack: [],
-    maxHistorySize: 50
+    // Lower than a typical editor because each audio history entry can hold
+    // hundreds of MB of AudioBuffer references.
+    maxHistorySize: 20
   }),
 
   getters: {

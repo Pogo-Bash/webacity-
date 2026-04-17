@@ -8,6 +8,8 @@ class AudioEngine {
     this.audioContext = null;
     this.masterGain = null;
     this.tracks = new Map();
+    // Per-track list of currently-scheduled buffer sources, so stop() can cancel them.
+    this.activeSources = new Map();
     this.isPlaying = false;
     this.currentTime = 0;
     this.sampleRate = 44100;
@@ -140,6 +142,15 @@ class AudioEngine {
       track.source = null;
     }
 
+    // Cancel any scheduled clip sources for this track
+    const sources = this.activeSources.get(trackId);
+    if (sources) {
+      for (const source of sources) {
+        try { source.stop(); source.disconnect(); } catch (e) {}
+      }
+      this.activeSources.delete(trackId);
+    }
+
     // Disconnect audio nodes
     try {
       track.gainNode.disconnect();
@@ -154,58 +165,105 @@ class AudioEngine {
   }
 
   /**
-   * Play a specific track
+   * Schedule playback of the given clips on a track.
+   * Each clip is scheduled as its own BufferSource at its startTime, which
+   * avoids the memory/CPU cost of pre-mixing clips into a single track buffer.
+   *
+   * @param {string} trackId
+   * @param {Array} clips - [{ buffer, startTime, duration }, ...]
+   * @param {number} startOffset - playback position in seconds within the project
+   * @param {number} contextStartTime - audioContext time to anchor scheduling at
+   */
+  playTrackClips(trackId, clips, startOffset, contextStartTime) {
+    const track = this.tracks.get(trackId);
+    if (!track || track.muted) return;
+
+    const sources = this.activeSources.get(trackId) || [];
+
+    for (const clip of clips) {
+      if (!clip.buffer) continue;
+
+      const clipEnd = clip.startTime + clip.duration;
+      if (clipEnd <= startOffset) continue; // clip already passed
+
+      const sampleRate = clip.buffer.sampleRate;
+      // A split clip references a window of its parent buffer via
+      // bufferOffset/bufferLength (in samples). Translate that to the
+      // (offset, duration) pair expected by source.start().
+      const windowOffsetSec = (clip.bufferOffset || 0) / sampleRate;
+      const windowLengthSec = clip.bufferLength != null
+        ? clip.bufferLength / sampleRate
+        : clip.duration;
+
+      // When startOffset is inside the clip, start the buffer partway through.
+      const clipRelativeSkip = Math.max(0, startOffset - clip.startTime);
+      const playOffsetSec = windowOffsetSec + clipRelativeSkip;
+      const playDurationSec = Math.max(0, windowLengthSec - clipRelativeSkip);
+      if (playDurationSec <= 0) continue;
+
+      const when = contextStartTime + Math.max(0, clip.startTime - startOffset);
+
+      const source = this.audioContext.createBufferSource();
+      source.buffer = clip.buffer;
+      source.connect(track.gainNode);
+      try {
+        source.start(when, playOffsetSec, playDurationSec);
+      } catch (e) {
+        console.warn('Failed to start clip source:', e);
+        continue;
+      }
+      sources.push(source);
+    }
+
+    this.activeSources.set(trackId, sources);
+  }
+
+  /**
+   * Legacy single-buffer track playback (kept for any non-clip callers).
    */
   playTrack(trackId, startTime = 0) {
     const track = this.tracks.get(trackId);
     if (!track || !track.buffer) return;
 
-    // Stop existing source if playing
     if (track.source) {
-      track.source.stop();
-      track.source.disconnect();
+      try { track.source.stop(); track.source.disconnect(); } catch (e) {}
     }
 
-    // Create new buffer source
     track.source = this.audioContext.createBufferSource();
     track.source.buffer = track.buffer;
     track.source.connect(track.gainNode);
-
-    // Start playback
     track.source.start(0, startTime);
   }
 
   /**
-   * Play all tracks
+   * @deprecated Prefer audioStore.play() which calls playTrackClips per track.
+   * Kept as a no-op guard so old calls don't crash.
    */
   play(startTime = 0) {
     this.resume();
     this.currentTime = startTime;
-
-    for (const [trackId, track] of this.tracks) {
-      if (!track.muted && track.buffer) {
-        this.playTrack(trackId, startTime);
-      }
-    }
-
     this.isPlaying = true;
   }
 
   /**
-   * Stop playback
+   * Stop playback - cancels every scheduled source.
    */
   stop() {
-    for (const [trackId, track] of this.tracks) {
-      if (track.source) {
-        try {
-          track.source.stop();
-          track.source.disconnect();
-          track.source = null;
-        } catch (e) {
-          // Source may already be stopped
-        }
+    for (const [, sources] of this.activeSources) {
+      for (const source of sources) {
+        try { source.stop(); source.disconnect(); } catch (e) { /* already stopped */ }
       }
     }
+    this.activeSources.clear();
+
+    // Also cancel any legacy single-source tracks
+    for (const [, track] of this.tracks) {
+      if (track.source) {
+        try { track.source.stop(); track.source.disconnect(); } catch (e) {}
+        track.source = null;
+      }
+    }
+
     this.isPlaying = false;
     this.currentTime = 0;
   }
@@ -293,15 +351,70 @@ class AudioEngine {
   }
 
   /**
-   * Get mixed buffer from all tracks (for export)
+   * Render clips from the given tracks into a single AudioBuffer using an
+   * OfflineAudioContext. Only used for export - during editing there is no
+   * pre-mixed track buffer.
+   *
+   * @param {Array} trackSpecs - [{ id, clips, volume, pan, muted }, ...]
+   * @returns {Promise<AudioBuffer|null>}
+   */
+  async renderTracksOffline(trackSpecs, masterVolume = 1) {
+    const sampleRate = this.sampleRate;
+
+    let totalDuration = 0;
+    for (const t of trackSpecs) {
+      if (t.muted) continue;
+      for (const clip of t.clips) {
+        totalDuration = Math.max(totalDuration, clip.startTime + clip.duration);
+      }
+    }
+    if (totalDuration === 0) return null;
+
+    const length = Math.ceil(totalDuration * sampleRate);
+    const offlineCtx = new OfflineAudioContext(2, length, sampleRate);
+
+    const master = offlineCtx.createGain();
+    master.gain.value = masterVolume;
+    master.connect(offlineCtx.destination);
+
+    for (const t of trackSpecs) {
+      if (t.muted) continue;
+      const gain = offlineCtx.createGain();
+      gain.gain.value = t.volume ?? 1;
+      const pan = offlineCtx.createStereoPanner();
+      pan.pan.value = t.pan ?? 0;
+      gain.connect(pan);
+      pan.connect(master);
+
+      for (const clip of t.clips) {
+        if (!clip.buffer) continue;
+        const source = offlineCtx.createBufferSource();
+        source.buffer = clip.buffer;
+        source.connect(gain);
+
+        const sr = clip.buffer.sampleRate;
+        const windowOffsetSec = (clip.bufferOffset || 0) / sr;
+        const windowLengthSec = clip.bufferLength != null
+          ? clip.bufferLength / sr
+          : clip.duration;
+        source.start(clip.startTime, windowOffsetSec, windowLengthSec);
+      }
+    }
+
+    return await offlineCtx.startRendering();
+  }
+
+  /**
+   * @deprecated Legacy sync mix from pre-mixed track.buffers. Kept as a
+   * compatibility shim for callers that still read track.buffer directly; the
+   * clip-based path uses renderTracksOffline.
    */
   getMixedBuffer() {
-    // Find all non-muted tracks with buffers
     const activeTracks = [];
     let maxDuration = 0;
     let maxChannels = 2;
 
-    for (const [trackId, track] of this.tracks) {
+    for (const [, track] of this.tracks) {
       if (!track.muted && track.buffer) {
         activeTracks.push(track);
         maxDuration = Math.max(maxDuration, track.buffer.duration);
@@ -311,28 +424,19 @@ class AudioEngine {
 
     if (activeTracks.length === 0) return null;
 
-    // Create output buffer
     const sampleRate = this.sampleRate;
     const length = Math.ceil(maxDuration * sampleRate);
     const mixedBuffer = this.audioContext.createBuffer(maxChannels, length, sampleRate);
+    for (let ch = 0; ch < maxChannels; ch++) mixedBuffer.getChannelData(ch).fill(0);
 
-    // Initialize with silence
-    for (let ch = 0; ch < maxChannels; ch++) {
-      mixedBuffer.getChannelData(ch).fill(0);
-    }
-
-    // Mix all tracks
     for (const track of activeTracks) {
       const buffer = track.buffer;
       const volume = track.volume;
-
       for (let ch = 0; ch < maxChannels; ch++) {
         const mixedData = mixedBuffer.getChannelData(ch);
         const sourceChannelIndex = Math.min(ch, buffer.numberOfChannels - 1);
         const sourceData = buffer.getChannelData(sourceChannelIndex);
-
         for (let i = 0; i < Math.min(sourceData.length, mixedData.length); i++) {
-          // Mix with volume applied
           mixedData[i] = Math.max(-1, Math.min(1, mixedData[i] + sourceData[i] * volume));
         }
       }

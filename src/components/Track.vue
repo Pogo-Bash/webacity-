@@ -61,7 +61,7 @@
       <!-- Audio clips -->
       <AudioClip
         v-for="clip in track.clips"
-        :key="clip.id + '-' + (clip._lastModified || 0)"
+        :key="clip.id"
         :clip="clip"
         :track-id="track.id"
         :project-duration="audioStore.duration || 1"
@@ -167,7 +167,6 @@ const props = defineProps({
 })
 
 const audioStore = useAudioStore()
-const waveformCanvas = ref(null)
 const timeMarkerCanvas = ref(null)
 const trackContainer = ref(null)
 const volume = ref(props.track.volume)
@@ -181,16 +180,17 @@ const contextMenuPosition = ref({ x: 0, y: 0 })
 const selectionStyle = computed(() => {
   if (!audioStore.selection || audioStore.selection.trackId !== props.track.id) return {}
 
-  if (!props.track.duration) return {}
+  const projectDuration = audioStore.duration || props.track.duration || 0
+  if (!projectDuration) return {}
 
-  const canvas = waveformCanvas.value
-  if (!canvas) return {}
+  const container = trackContainer.value
+  if (!container) return {}
 
-  const rect = canvas.getBoundingClientRect()
+  const width = container.clientWidth
   const { startTime, endTime } = audioStore.selection
 
-  const leftPx = (startTime / props.track.duration) * rect.width
-  const rightPx = (endTime / props.track.duration) * rect.width
+  const leftPx = (startTime / projectDuration) * width
+  const rightPx = (endTime / projectDuration) * width
 
   return {
     left: `${leftPx}px`,
@@ -199,18 +199,8 @@ const selectionStyle = computed(() => {
 })
 
 onMounted(() => {
-  drawWaveform()
   drawTimeMarkers()
-  // Redraw on window resize
-  window.addEventListener('resize', () => {
-    drawWaveform()
-    drawTimeMarkers()
-  })
-})
-
-watch(() => props.track.waveformData, () => {
-  drawWaveform()
-  drawTimeMarkers()
+  window.addEventListener('resize', drawTimeMarkers)
 })
 
 watch(() => props.track.duration, () => {
@@ -219,81 +209,8 @@ watch(() => props.track.duration, () => {
 
 watch(() => audioStore.duration, () => {
   // Redraw when project duration changes (longest track changes)
-  drawWaveform()
   drawTimeMarkers()
 })
-
-function drawWaveform() {
-  const canvas = waveformCanvas.value
-  if (!canvas) return
-
-  const ctx = canvas.getContext('2d')
-  const dpr = window.devicePixelRatio || 1
-  const rect = canvas.getBoundingClientRect()
-
-  // Set canvas size accounting for device pixel ratio
-  canvas.width = rect.width * dpr
-  canvas.height = rect.height * dpr
-
-  ctx.scale(dpr, dpr)
-
-  // Clear canvas
-  ctx.fillStyle = '#111827' // gray-900
-  ctx.fillRect(0, 0, rect.width, rect.height)
-
-  if (!props.track.waveformData || props.track.waveformData.length === 0) {
-    // Draw empty state
-    ctx.fillStyle = '#4b5563' // gray-600
-    ctx.font = '14px sans-serif'
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText('No audio loaded', rect.width / 2, rect.height / 2)
-    return
-  }
-
-  // Scale waveform based on project duration (longest track)
-  const projectDuration = audioStore.duration || props.track.duration || 1
-  const trackDuration = props.track.duration || 0
-  const scaleFactor = trackDuration / projectDuration
-  const waveformWidth = rect.width * scaleFactor
-
-  // Draw waveform
-  const data = props.track.waveformData
-  const middle = rect.height / 2
-  const barWidth = waveformWidth / data.length
-  const color = props.track.color || '#3b82f6'
-
-  ctx.fillStyle = color
-
-  for (let i = 0; i < data.length; i++) {
-    const { min, max } = data[i]
-    const x = i * barWidth
-    const height = (max - min) * middle
-
-    ctx.fillRect(x, middle - (max * middle), Math.max(1, barWidth - 0.5), height)
-  }
-
-  // Draw center line across scaled waveform
-  ctx.strokeStyle = '#374151' // gray-700
-  ctx.lineWidth = 1
-  ctx.beginPath()
-  ctx.moveTo(0, middle)
-  ctx.lineTo(waveformWidth, middle)
-  ctx.stroke()
-
-  // Draw gray background for remainder
-  if (waveformWidth < rect.width) {
-    ctx.fillStyle = '#0f172a' // darker gray
-    ctx.fillRect(waveformWidth, 0, rect.width - waveformWidth, rect.height)
-
-    // Extend center line to end
-    ctx.strokeStyle = '#1f2937'
-    ctx.beginPath()
-    ctx.moveTo(waveformWidth, middle)
-    ctx.lineTo(rect.width, middle)
-    ctx.stroke()
-  }
-}
 
 function drawTimeMarkers() {
   const canvas = timeMarkerCanvas.value
@@ -376,12 +293,12 @@ let selectionStartTime = 0
 function startSelection(e) {
   // Only select on left click
   if (e.button !== 0) return
+  if (!trackContainer.value) return
 
-  const rect = waveformCanvas.value.getBoundingClientRect()
+  const rect = trackContainer.value.getBoundingClientRect()
   const x = e.clientX - rect.left
-  const duration = props.track.duration || 0
+  const duration = audioStore.duration || props.track.duration || 0
 
-  // Convert pixel to time
   selectionStartTime = (x / rect.width) * duration
 
   isSelecting.value = true
@@ -390,15 +307,13 @@ function startSelection(e) {
 
 function updateSelection(e) {
   if (!isSelecting.value) return
+  if (!trackContainer.value) return
 
-  const rect = waveformCanvas.value.getBoundingClientRect()
+  const rect = trackContainer.value.getBoundingClientRect()
   const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width))
-  const duration = props.track.duration || 0
+  const duration = audioStore.duration || props.track.duration || 0
 
-  // Convert pixel to time
   const currentTime = (x / rect.width) * duration
-
-  // Update selection in store
   audioStore.setSelection(props.track.id, selectionStartTime, currentTime)
 }
 
