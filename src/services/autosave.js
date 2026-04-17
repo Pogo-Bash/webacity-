@@ -2,6 +2,7 @@
  * Autosave Service using OPFS (Origin Private File System)
  * Automatically saves project state including audio buffers to prevent data loss
  */
+import { markRaw } from 'vue'
 
 const AUTOSAVE_DIR = 'webacity-autosave'
 const PROJECT_FILE = 'project.json'
@@ -375,11 +376,11 @@ export class AutosaveService {
             const clip = {
               id: clipData.id,
               name: clipData.name,
-              buffer: audioBuffer,
+              buffer: markRaw(audioBuffer),
               startTime: clipData.startTime,
               duration: clipData.duration,
               color: clipData.color,
-              waveformData: this.audioStore.generateWaveformData(audioBuffer)
+              waveformData: markRaw(this.audioStore.generateWaveformData(audioBuffer))
             }
 
             track.clips.push(clip)

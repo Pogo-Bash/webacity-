@@ -1,4 +1,5 @@
 import { defineStore } from 'pinia'
+import { markRaw } from 'vue'
 import AudioEngine from '../audio/AudioEngine'
 import WasmBridge from '../audio/WasmBridge'
 import AudioRecorder from '../audio/AudioRecorder'
@@ -644,7 +645,7 @@ export const useAudioStore = defineStore('audio', {
 
       // Copy clip data to clipboard
       this.clipboard = {
-        buffer: clip.buffer,
+        buffer: markRaw(clip.buffer),
         duration: clip.duration,
         startTime: 0 // Will be pasted at cursor position
       }
@@ -733,7 +734,7 @@ export const useAudioStore = defineStore('audio', {
       }
 
       this.clipboard = {
-        buffer: clipBuffer,
+        buffer: markRaw(clipBuffer),
         duration: endTime - startTime
       }
 
@@ -779,10 +780,10 @@ export const useAudioStore = defineStore('audio', {
         newData.set(originalData.slice(endSample), startSample)
       }
 
-      track.buffer = newBuffer
+      track.buffer = markRaw(newBuffer)
       track.duration = newBuffer.duration
       this.engine.setTrackBuffer(trackId, newBuffer)
-      track.waveformData = this.generateWaveformData(newBuffer)
+      track.waveformData = markRaw(this.generateWaveformData(newBuffer))
       this.updateDuration()
       this.clearSelection()
 
@@ -822,10 +823,10 @@ export const useAudioStore = defineStore('audio', {
         }
 
         // Update track
-        track.buffer = newBuffer
+        track.buffer = markRaw(newBuffer)
         track.duration = newBuffer.duration
         this.engine.setTrackBuffer(trackId, newBuffer)
-        track.waveformData = this.generateWaveformData(newBuffer)
+        track.waveformData = markRaw(this.generateWaveformData(newBuffer))
         this.updateDuration()
         console.log('Pasted into empty track at position', position)
         return true
@@ -854,10 +855,10 @@ export const useAudioStore = defineStore('audio', {
         newData.set(originalData.slice(positionSample), positionSample + clipLength)
       }
 
-      track.buffer = newBuffer
+      track.buffer = markRaw(newBuffer)
       track.duration = newBuffer.duration
       this.engine.setTrackBuffer(trackId, newBuffer)
-      track.waveformData = this.generateWaveformData(newBuffer)
+      track.waveformData = markRaw(this.generateWaveformData(newBuffer))
       this.updateDuration()
 
       return true
@@ -967,19 +968,14 @@ export const useAudioStore = defineStore('audio', {
         // Create a new clip object with updated buffer and waveform (to trigger Vue reactivity)
         const updatedClip = {
           ...clip,
-          buffer: newBuffer,
-          waveformData: this.generateWaveformData(newBuffer),
-          // Add a timestamp to force reactivity
-          _lastModified: Date.now()
+          buffer: markRaw(newBuffer),
+          waveformData: markRaw(this.generateWaveformData(newBuffer))
         }
 
         console.log('Created updated clip with new waveform data')
 
         // Replace the clip in the array (this triggers Vue reactivity)
         track.clips.splice(clipIndex, 1, updatedClip)
-
-        // Force reactivity by reassigning the clips array
-        track.clips = [...track.clips]
 
         console.log('Updated clips array')
 
@@ -1085,9 +1081,9 @@ export const useAudioStore = defineStore('audio', {
         }
 
         // Update track
-        track.buffer = newBuffer
+        track.buffer = markRaw(newBuffer)
         this.engine.setTrackBuffer(trackId, newBuffer)
-        track.waveformData = this.generateWaveformData(newBuffer)
+        track.waveformData = markRaw(this.generateWaveformData(newBuffer))
 
         console.log(`Applied ${effectName} to track ${trackId}${selection ? ' (selection)' : ''}`)
       } catch (error) {
@@ -1290,9 +1286,9 @@ export const useAudioStore = defineStore('audio', {
       const snippet = {
         id: snippetId,
         name: snippetName,
-        buffer: snippetBuffer,
+        buffer: markRaw(snippetBuffer),
         duration,
-        waveformData: this.generateWaveformData(snippetBuffer)
+        waveformData: markRaw(this.generateWaveformData(snippetBuffer))
       }
 
       this.snippets.push(snippet)
@@ -1343,10 +1339,10 @@ export const useAudioStore = defineStore('audio', {
       const clip = {
         id: clipId,
         name: name || `Clip ${track.clips.length + 1}`,
-        buffer,
+        buffer: markRaw(buffer),
         startTime,
         duration: buffer.duration,
-        waveformData: this.generateWaveformData(buffer),
+        waveformData: markRaw(this.generateWaveformData(buffer)),
         color: track.color
       }
 
@@ -1468,9 +1464,9 @@ export const useAudioStore = defineStore('audio', {
       }
 
       // Update track
-      track.buffer = mixedBuffer
+      track.buffer = markRaw(mixedBuffer)
       track.duration = maxEndTime
-      track.waveformData = this.generateWaveformData(mixedBuffer)
+      track.waveformData = markRaw(this.generateWaveformData(mixedBuffer))
       this.engine.setTrackBuffer(trackId, mixedBuffer)
     },
 
@@ -1544,18 +1540,18 @@ export const useAudioStore = defineStore('audio', {
       }
 
       // Update the original clip to be the first part
-      clip.buffer = firstBuffer
+      clip.buffer = markRaw(firstBuffer)
       clip.duration = firstBuffer.duration
-      clip.waveformData = this.generateWaveformData(firstBuffer)
+      clip.waveformData = markRaw(this.generateWaveformData(firstBuffer))
 
       // Create new clip for the second part
       const secondClip = {
         id: `clip_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
         name: `${clip.name} (2)`,
-        buffer: secondBuffer,
+        buffer: markRaw(secondBuffer),
         startTime: splitTime,
         duration: secondBuffer.duration,
-        waveformData: this.generateWaveformData(secondBuffer),
+        waveformData: markRaw(this.generateWaveformData(secondBuffer)),
         color: clip.color
       }
 

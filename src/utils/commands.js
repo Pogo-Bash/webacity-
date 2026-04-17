@@ -2,6 +2,7 @@
  * Command pattern for undo/redo functionality
  * Each command must implement execute() and undo() methods
  */
+import { markRaw } from 'vue'
 
 /**
  * Add clip to track
@@ -354,8 +355,8 @@ export class ApplyEffectToClipCommand {
       const clip = clipData.clip
       this.previousClipState = {
         ...clip,
-        buffer: this.cloneBuffer(clip.buffer),
-        waveformData: [...clip.waveformData]
+        buffer: markRaw(this.cloneBuffer(clip.buffer)),
+        waveformData: markRaw([...clip.waveformData])
       }
     }
 
@@ -375,11 +376,9 @@ export class ApplyEffectToClipCommand {
     // Restore previous clip state
     track.clips.splice(clipIndex, 1, {
       ...this.previousClipState,
-      _lastModified: Date.now()
+      buffer: markRaw(this.previousClipState.buffer),
+      waveformData: markRaw(this.previousClipState.waveformData)
     })
-
-    // Force reactivity
-    track.clips = [...track.clips]
 
     // Rebuild track buffer
     this.audioStore.updateTrackBufferFromClips(this.trackId)
@@ -504,9 +503,9 @@ export class ApplyEffectCommand {
     if (!track || !this.previousBuffer) return
 
     // Restore previous buffer
-    track.buffer = this.previousBuffer
+    track.buffer = markRaw(this.previousBuffer)
     this.audioStore.engine.setTrackBuffer(this.trackId, this.previousBuffer)
-    track.waveformData = this.audioStore.generateWaveformData(this.previousBuffer)
+    track.waveformData = markRaw(this.audioStore.generateWaveformData(this.previousBuffer))
   }
 
   cloneBuffer(buffer) {
@@ -550,9 +549,9 @@ export class DeleteSelectionCommand {
     const track = this.audioStore.tracks.find(t => t.id === this.trackId)
     if (!track || !this.previousBuffer) return
 
-    track.buffer = this.previousBuffer
+    track.buffer = markRaw(this.previousBuffer)
     this.audioStore.engine.setTrackBuffer(this.trackId, this.previousBuffer)
-    track.waveformData = this.audioStore.generateWaveformData(this.previousBuffer)
+    track.waveformData = markRaw(this.audioStore.generateWaveformData(this.previousBuffer))
     track.duration = this.previousBuffer.duration
     this.audioStore.updateDuration()
   }
@@ -599,9 +598,9 @@ export class PasteCommand {
 
     // Restore previous buffer (may be null)
     if (this.previousBuffer) {
-      track.buffer = this.previousBuffer
+      track.buffer = markRaw(this.previousBuffer)
       this.audioStore.engine.setTrackBuffer(this.trackId, this.previousBuffer)
-      track.waveformData = this.audioStore.generateWaveformData(this.previousBuffer)
+      track.waveformData = markRaw(this.audioStore.generateWaveformData(this.previousBuffer))
       track.duration = this.previousBuffer.duration
     } else {
       // Track was empty before, restore to empty
