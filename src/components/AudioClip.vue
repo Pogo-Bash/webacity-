@@ -46,7 +46,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useAudioStore } from '../stores/audioStore'
 
 const props = defineProps({
@@ -69,6 +69,10 @@ const emit = defineEmits(['delete'])
 const audioStore = useAudioStore()
 const clipElement = ref(null)
 const waveformCanvas = ref(null)
+// Virtualization: only draw/keep the canvas painted when the clip is near the
+// viewport. Initialised from mount via IntersectionObserver.
+const isVisible = ref(false)
+let intersectionObserver = null
 
 // Calculate clip position and width in pixels
 const clipPosition = computed(() => {
@@ -282,37 +286,69 @@ function onDragEnd(event) {
   // Clean up if needed
 }
 
-// Watch for changes that require redraw
+// Watch for changes that require redraw. Only trigger while the clip is
+// actually on-screen - off-screen clips repaint when they scroll back in.
 watch(
   () => props.clip,
   () => {
-    setTimeout(() => draw(), 0)
+    if (isVisible.value) setTimeout(() => draw(), 0)
   },
   { deep: true }
 )
 
-// Also watch project duration separately as it affects positioning
 watch(
   () => props.projectDuration,
   () => {
-    setTimeout(() => draw(), 0)
+    if (isVisible.value) setTimeout(() => draw(), 0)
   }
 )
 
-// Watch for view mode changes
 watch(
   () => audioStore.viewMode,
   () => {
-    setTimeout(() => draw(), 0)
+    if (isVisible.value) setTimeout(() => draw(), 0)
   }
 )
 
+function onResize() {
+  if (isVisible.value) setTimeout(() => draw(), 0)
+}
+
 onMounted(() => {
-  // Delay initial draw to ensure element is sized
-  setTimeout(() => draw(), 100)
-  // Redraw on window resize
-  window.addEventListener('resize', () => {
-    setTimeout(() => draw(), 0)
-  })
+  if (typeof IntersectionObserver !== 'undefined' && clipElement.value) {
+    intersectionObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          if (!isVisible.value) {
+            isVisible.value = true
+            setTimeout(() => draw(), 0)
+          }
+        } else if (isVisible.value) {
+          isVisible.value = false
+          // Free GPU-backed canvas memory when scrolled far out of view.
+          const canvas = waveformCanvas.value
+          if (canvas) {
+            const ctx = canvas.getContext('2d')
+            ctx.clearRect(0, 0, canvas.width, canvas.height)
+          }
+        }
+      }
+    }, { rootMargin: '200px' })
+    intersectionObserver.observe(clipElement.value)
+  } else {
+    // Fallback for environments without IntersectionObserver.
+    isVisible.value = true
+    setTimeout(() => draw(), 100)
+  }
+
+  window.addEventListener('resize', onResize)
+})
+
+onBeforeUnmount(() => {
+  if (intersectionObserver) {
+    intersectionObserver.disconnect()
+    intersectionObserver = null
+  }
+  window.removeEventListener('resize', onResize)
 })
 </script>
